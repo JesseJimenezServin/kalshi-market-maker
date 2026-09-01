@@ -45,6 +45,8 @@ from incentive_screener import ScreenedProgram, screen_incentive_programs, print
 from reward_simulator import score_both_sides
 from adverse_selection_sim import HypotheticalQuote, InventoryState, process_trade_for_inventory
 from logger import SimulationLogger
+import quoting_policy
+from risk_engine import RiskEngine
 
 logger = logging.getLogger("main")
 
@@ -57,26 +59,8 @@ class MarketRuntimeState:
         self.target_size = target_size
         self.discount_factor = discount_factor
         self.inventory = InventoryState(ticker=ticker)
+        self.risk_engine = RiskEngine(ticker=ticker)
         self.quote: HypotheticalQuote | None = None  # set once we have book data
-
-    def refresh_quote_from_book(self, book) -> None:
-        """
-        Naive default quoting rule for Phase 0 simulation: rest at the
-        current best bid on each side (i.e. join the touch), sized at
-        config.DEFAULT_SIMULATED_QUOTE_SIZE. This is intentionally simple;
-        the point of Phase 0 is to measure outcomes of a baseline policy,
-        which later phases can improve on (e.g. inventory skew).
-        """
-        best_yes = book.best_yes_bid()
-        best_no = book.best_no_bid()
-        if best_yes is None or best_no is None:
-            return
-        self.quote = HypotheticalQuote(
-            yes_price=best_yes[0],
-            yes_size=config.DEFAULT_SIMULATED_QUOTE_SIZE,
-            no_price=best_no[0],
-            no_size=config.DEFAULT_SIMULATED_QUOTE_SIZE,
-        )
 
 
 def build_market_states(
@@ -156,44 +140,69 @@ async def scoring_loop(
                 no_levels=book.no_side_sorted_desc(),
             )
 
-            state.refresh_quote_from_book(book)
-            if state.quote is None:
-                continue
-
-            yes_result, no_result = score_both_sides(
-                book,
-                target_size=state.target_size,
-                discount_factor=state.discount_factor,
-                my_yes_price=state.quote.yes_price,
-                my_yes_size=state.quote.yes_size,
-                my_no_price=state.quote.no_price,
-                my_no_size=state.quote.no_size,
-            )
-
-            sim_logger.log_snapshot_score(
-                ticker=ticker,
-                qualifies_yes=yes_result.qualifies,
-                qualifies_no=no_result.qualifies,
-                my_share_yes=yes_result.my_share,
-                my_share_no=no_result.my_share,
-                reference_price_yes=yes_result.reference_price,
-                reference_price_no=no_result.reference_price,
-            )
-
-            # Mark inventory to current mid for unrealized P&L tracking.
+            # Mid price is needed both by the risk engine (before the quote
+            # is computed) and by the inventory mark-to-market below, so
+            # compute it once, up front, and reuse it. If either side of the
+            # book is empty we can't compute a mid at all this tick.
             best_yes = book.best_yes_bid()
             best_no = book.best_no_bid()
-            if best_yes and best_no:
-                mid = (best_yes[0] + (100 - best_no[0])) / 2.0
-                unrealized = state.inventory.mark_to_market_pnl_cents(mid)
-                sim_logger.log_inventory_mark(
-                    ticker=ticker,
-                    net_yes_contracts=state.inventory.net_yes_contracts,
-                    avg_entry_price=state.inventory.avg_entry_price,
-                    mid_price=mid,
-                    unrealized_pnl_cents=unrealized,
-                    realized_pnl_cents=state.inventory.realized_pnl_cents,
+            if best_yes is None or best_no is None:
+                continue
+            mid = (best_yes[0] + (100 - best_no[0])) / 2.0
+
+            state.risk_engine.update(mid, state.inventory, config.MAX_SIMULATED_INVENTORY)
+
+            state.quote = quoting_policy.compute_quote(
+                book,
+                state.risk_engine.risk_level,
+                state.inventory,
+                config.DEFAULT_SIMULATED_QUOTE_SIZE,
+                config.MAX_SIMULATED_INVENTORY,
+            )
+
+            fill = quoting_policy.maybe_execute_stop_loss(
+                book,
+                state.inventory,
+                state.risk_engine.risk_level,
+                config.MAX_SIMULATED_INVENTORY,
+                config.HARD_STOP_INVENTORY_FRACTION,
+            )
+            if fill is not None:
+                sim_logger.log_simulated_stop_loss(ticker=ticker, **fill)
+
+            if state.quote is not None:
+                yes_result, no_result = score_both_sides(
+                    book,
+                    target_size=state.target_size,
+                    discount_factor=state.discount_factor,
+                    my_yes_price=state.quote.yes_price,
+                    my_yes_size=state.quote.yes_size,
+                    my_no_price=state.quote.no_price,
+                    my_no_size=state.quote.no_size,
                 )
+
+                sim_logger.log_snapshot_score(
+                    ticker=ticker,
+                    qualifies_yes=yes_result.qualifies,
+                    qualifies_no=no_result.qualifies,
+                    my_share_yes=yes_result.my_share,
+                    my_share_no=no_result.my_share,
+                    reference_price_yes=yes_result.reference_price,
+                    reference_price_no=no_result.reference_price,
+                )
+
+            # Mark inventory to current mid for unrealized P&L tracking.
+            # Always logged (even if the quote was pulled or a stop-loss
+            # just fired) so inventory_marks stays a continuous timeline.
+            unrealized = state.inventory.mark_to_market_pnl_cents(mid)
+            sim_logger.log_inventory_mark(
+                ticker=ticker,
+                net_yes_contracts=state.inventory.net_yes_contracts,
+                avg_entry_price=state.inventory.avg_entry_price,
+                mid_price=mid,
+                unrealized_pnl_cents=unrealized,
+                realized_pnl_cents=state.inventory.realized_pnl_cents,
+            )
 
         await asyncio.sleep(interval_sec)
 

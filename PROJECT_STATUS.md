@@ -29,14 +29,20 @@ sustained data-collection window.
 - adverse_selection_sim.py -- simulates hypothetical inventory + P&L from
   real trade flow against a hypothetical resting quote
 - logger.py -- SQLite persistence (snapshot_scores, simulated_fills,
-  inventory_marks, orderbook_snapshots, incentive_program_snapshots tables)
+  inventory_marks, orderbook_snapshots, incentive_program_snapshots,
+  simulated_stop_losses tables)
+- risk_engine.py -- per-market RiskEngine: rolling mid-price volatility +
+  inventory fraction -> composite LOW/ELEVATED/HIGH risk level
+- quoting_policy.py -- active quoting policy: inventory skew, widen/pull
+  on risk escalation, simulated hard-stop flatten (crosses the spread via
+  adverse_selection_sim.InventoryState, still no real orders)
 - main.py -- orchestrates all of the above; NO live orders are ever
   placed anywhere in this codebase (verified via grep, 2026-08-31)
 - server.py -- read-only FastAPI dashboard; streams data/paper_trading.sqlite
   over /ws once per second, never talks to Kalshi
 - templates/dashboard.html -- single-page dashboard UI (markets table,
   order book depth bars, recent fills, performance chart)
-- test_logic.py -- offline unit tests, no network required, 9/9 passing
+- test_logic.py -- offline unit tests, no network required, 12/12 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -56,14 +62,37 @@ sustained data-collection window.
   panel and "Daily Pool ($)" column reflect real persisted data rather
   than being fabricated in the UI layer.
 
+## Active milestone
+- 2026-08-31: Upgraded Phase 0 from a naive static quoting policy to an
+  active strategy simulation, still fully read-only/paper-trading. New
+  risk_engine.py tracks rolling mid-price volatility + inventory fraction
+  into a LOW/ELEVATED/HIGH risk level per market. New quoting_policy.py
+  skews the hypothetical quote toward reducing inventory, widens it at
+  ELEVATED risk, pulls it entirely at HIGH risk, and simulates a hard-stop
+  flatten (crossing the spread via adverse_selection_sim.InventoryState)
+  once inventory crosses a configurable threshold at HIGH risk -- logged
+  to a new simulated_stop_losses table, distinct from passive fills.
+  Wired into main.py's scoring_loop; reward_simulator.py's scoring math
+  and adverse_selection_sim.py's fill/inventory math were not touched.
+  3 new unit tests added (12/12 passing); re-verified via grep that no
+  order-placing code exists anywhere in the codebase.
+
 ## Known simplifications / open items
 - "My share" of reward score still assumes we're the ONLY provider at our
   exact price level -- overestimates share if others already quote there.
   True fix requires Phase 1 real fills, not fixable in pure simulation.
-- Quoting policy is naive (joins best bid, no inventory skew, no
-  news-window awareness) -- intentional baseline for Phase 0.
 - No hosting/deployment yet -- main.py and server.py both currently run
   locally only.
+- Stop-loss events (simulated_stop_losses) don't yet appear in server.py's
+  dashboard -- the "Recent Simulated Fills" panel only reads
+  simulated_fills. Not yet wired in; P&L chart is unaffected since it
+  reads inventory_marks, which reflects stop-loss impact automatically.
+- Two planned workstreams, not yet started: scheduled-event calendar
+  awareness (feeding known event/resolution timing into the quoting
+  policy or market screener as a risk flag) and crowding-aware market
+  selection (accounting for how crowded a price level already is /
+  observed volatility when ranking markets in incentive_screener.py,
+  beyond today's simple reward-density heuristic).
 - Dashboard's "Cumulative Reward Score" chart series is a unitless proxy
   (running sum of combined_score), not a dollar figure -- Kalshi's real
   USD payout pools every participant's score over the full period, which

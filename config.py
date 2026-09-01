@@ -89,6 +89,36 @@ DEFAULT_SIMULATED_QUOTE_SIZE = 100  # contracts, per side
 MAX_SIMULATED_INVENTORY = 500
 
 # --------------------------------------------------------------------------
+# Active strategy simulation: risk engine + quoting policy
+# --------------------------------------------------------------------------
+# Rolling window (in scoring_loop snapshots, ~1s cadence) used to estimate
+# realized volatility of the mid price. Volatility is measured as the
+# stdev of tick-to-tick mid-price CHANGES in cents (not percent returns),
+# to avoid divide-by-zero / blowup near the 1c and 99c price extremes.
+VOLATILITY_WINDOW_SNAPSHOTS = 30
+
+# Thresholds on stdev-of-mid-changes (cents) that escalate risk level.
+VOLATILITY_ELEVATED_THRESHOLD = 1.5
+VOLATILITY_HIGH_THRESHOLD = 3.0
+
+# Thresholds on abs(net_yes_contracts) / max_inventory that escalate risk level.
+INVENTORY_FRACTION_ELEVATED_THRESHOLD = 0.4
+INVENTORY_FRACTION_HIGH_THRESHOLD = 0.7
+
+# At HIGH risk, if our inventory fraction is at/above this, actively flatten
+# (cross the spread) instead of just pulling the quote.
+HARD_STOP_INVENTORY_FRACTION = 0.8
+
+# Quote widening (in cents/ticks off best bid, after inventory skew is
+# applied) when risk_level == ELEVATED.
+WIDEN_TICKS_ELEVATED = 2
+
+# Maximum number of cents/ticks the quoting policy will skew yes/no prices
+# away from the touch in response to inventory, regardless of how large
+# net_yes_contracts / max_inventory becomes.
+MAX_INVENTORY_SKEW_TICKS = 5
+
+# --------------------------------------------------------------------------
 # Storage
 # --------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent

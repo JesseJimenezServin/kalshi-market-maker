@@ -60,11 +60,23 @@ CREATE TABLE IF NOT EXISTS incentive_program_snapshots (
     days_remaining REAL
 );
 
+CREATE TABLE IF NOT EXISTS simulated_stop_losses (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    price INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    net_yes_contracts_before INTEGER NOT NULL,
+    net_yes_contracts_after INTEGER NOT NULL,
+    reason TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts ON orderbook_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_incentive_snap_ticker_ts ON incentive_program_snapshots(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ticker, ts);
 """
 
 
@@ -171,4 +183,25 @@ class SimulationLogger:
                    (ts, ticker, period_reward, target_size, discount_factor_bps, days_remaining)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, period_reward, target_size, discount_factor_bps, days_remaining),
+            )
+
+    def log_simulated_stop_loss(
+        self,
+        ticker: str,
+        side: str,
+        price: int,
+        size: int,
+        net_yes_contracts_before: int,
+        net_yes_contracts_after: int,
+        reason: str,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO simulated_stop_losses
+                   (ts, ticker, side, price, size, net_yes_contracts_before,
+                    net_yes_contracts_after, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, side, price, size,
+                 net_yes_contracts_before, net_yes_contracts_after, reason),
             )

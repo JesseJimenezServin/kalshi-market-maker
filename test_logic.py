@@ -11,6 +11,8 @@ from reward_simulator import compute_reference_price, score_hypothetical_order, 
 from adverse_selection_sim import InventoryState, HypotheticalQuote, process_trade_for_inventory
 from incentive_screener import ScreenedProgram
 from main import build_market_states, compute_my_share_at_touched_price
+from risk_engine import RiskEngine, LOW, HIGH
+from quoting_policy import compute_quote, maybe_execute_stop_loss
 
 
 def test_orderbook_snapshot_and_delta():
@@ -174,6 +176,74 @@ def test_compute_my_share_at_touched_price_level():
     print("test_compute_my_share_at_touched_price_level: PASS")
 
 
+def test_compute_quote_skews_toward_flattening_long_inventory():
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 100]], no=[[48, 100]])
+
+    flat_inventory = InventoryState(ticker="TEST")
+    long_inventory = InventoryState(ticker="TEST", net_yes_contracts=400)
+
+    flat_quote = compute_quote(book, LOW, flat_inventory, base_size=100, max_inventory=500)
+    long_quote = compute_quote(book, LOW, long_inventory, base_size=100, max_inventory=500)
+
+    assert flat_quote is not None and long_quote is not None
+    # Long yes should skew the quote to encourage flattening: worse (lower)
+    # yes bid, better (higher) no bid.
+    assert long_quote.yes_price <= flat_quote.yes_price
+    assert long_quote.no_price >= flat_quote.no_price
+    assert (long_quote.yes_price, long_quote.no_price) != (flat_quote.yes_price, flat_quote.no_price)
+    print("test_compute_quote_skews_toward_flattening_long_inventory: PASS")
+
+
+def test_risk_engine_escalates_to_high_on_volatile_mid():
+    engine = RiskEngine(ticker="TEST")
+    inventory = InventoryState(ticker="TEST")
+
+    # Feed a stable sequence, long enough to fill the rolling window --
+    # should remain LOW throughout.
+    stable_mid = 50.0
+    for _ in range(40):
+        engine.update(stable_mid, inventory, max_inventory=500)
+    assert engine.risk_level == LOW, engine.risk_level
+
+    # Now feed large alternating swings that exceed VOLATILITY_HIGH_THRESHOLD.
+    mid = stable_mid
+    for i in range(40):
+        mid = 50.0 + (10.0 if i % 2 == 0 else -10.0)
+        engine.update(mid, inventory, max_inventory=500)
+    assert engine.risk_level == HIGH, engine.risk_level
+    print("test_risk_engine_escalates_to_high_on_volatile_mid: PASS")
+
+
+def test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise():
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 200]], no=[[48, 200]])
+
+    # Long yes at/above the hard-stop fraction, risk HIGH -> should fire.
+    inv = InventoryState(ticker="TEST", net_yes_contracts=420, avg_entry_price=45.0)
+    fill = maybe_execute_stop_loss(
+        book, inv, risk_level=HIGH, max_inventory=500, hard_stop_fraction=0.8,
+    )
+    assert fill is not None
+    assert fill["side"] == "no"
+    assert fill["price"] == 100 - 50  # crossed the best yes bid (50c) -> equiv no_price
+    assert fill["size"] == 420
+    assert fill["net_yes_contracts_before"] == 420
+    assert fill["net_yes_contracts_after"] == 0
+    assert inv.net_yes_contracts == 0, inv.net_yes_contracts
+
+    # Negative case: same inventory fraction, but risk not HIGH -> no fire.
+    inv2 = InventoryState(ticker="TEST", net_yes_contracts=420, avg_entry_price=45.0)
+    assert maybe_execute_stop_loss(book, inv2, risk_level=LOW, max_inventory=500, hard_stop_fraction=0.8) is None
+    assert inv2.net_yes_contracts == 420
+
+    # Negative case: risk HIGH, but inventory below the hard-stop threshold.
+    inv3 = InventoryState(ticker="TEST", net_yes_contracts=100, avg_entry_price=45.0)
+    assert maybe_execute_stop_loss(book, inv3, risk_level=HIGH, max_inventory=500, hard_stop_fraction=0.8) is None
+    assert inv3.net_yes_contracts == 100
+    print("test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise: PASS")
+
+
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_reference_price()
@@ -184,4 +254,7 @@ if __name__ == "__main__":
     test_process_trade_for_inventory_end_to_end()
     test_build_market_states_uses_real_incentive_program_values()
     test_compute_my_share_at_touched_price_level()
+    test_compute_quote_skews_toward_flattening_long_inventory()
+    test_risk_engine_escalates_to_high_on_volatile_mid()
+    test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
     print("\nALL TESTS PASSED")
