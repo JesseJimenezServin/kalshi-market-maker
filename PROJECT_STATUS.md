@@ -30,19 +30,22 @@ sustained data-collection window.
   real trade flow against a hypothetical resting quote
 - logger.py -- SQLite persistence (snapshot_scores, simulated_fills,
   inventory_marks, orderbook_snapshots, incentive_program_snapshots,
-  simulated_stop_losses tables)
+  simulated_stop_losses, news_events tables)
 - risk_engine.py -- per-market RiskEngine: rolling mid-price volatility +
   inventory fraction -> composite LOW/ELEVATED/HIGH risk level
 - quoting_policy.py -- active quoting policy: inventory skew, widen/pull
   on risk escalation, simulated hard-stop flatten (crosses the spread via
   adverse_selection_sim.InventoryState, still no real orders)
+- news_feed.py -- zero-cost news-awareness signal: polls GDELT's free
+  Doc 2.0 API (no key required), rule-based keyword-overlap relevance
+  scoring (no LLM), feeds a decaying news_signal into RiskEngine
 - main.py -- orchestrates all of the above; NO live orders are ever
   placed anywhere in this codebase (verified via grep, 2026-08-31)
 - server.py -- read-only FastAPI dashboard; streams data/paper_trading.sqlite
   over /ws once per second, never talks to Kalshi
 - templates/dashboard.html -- single-page dashboard UI (markets table,
   order book depth bars, recent fills, performance chart)
-- test_logic.py -- offline unit tests, no network required, 12/12 passing
+- test_logic.py -- offline unit tests, no network required, 14/14 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -76,8 +79,35 @@ sustained data-collection window.
   and adverse_selection_sim.py's fill/inventory math were not touched.
   3 new unit tests added (12/12 passing); re-verified via grep that no
   order-placing code exists anywhere in the codebase.
+- 2026-08-31 (completed): Added a zero-cost, purely advisory news-awareness
+  signal. New news_feed.py polls GDELT's free Doc 2.0 API (no key, no
+  cost) for recent articles matching keywords derived from each watched
+  market's title/subtitle, and flags "relevant" articles via a coarse
+  rule-based keyword-overlap score (no LLM, no paid service anywhere).
+  RiskEngine gained a news_signal field + register_news_event(), which
+  decays after a configurable window and nudges risk level up (toward
+  ELEVATED) alongside volatility and inventory -- direction/confidence-
+  free by design, given the heuristic's limited precision. New
+  news_events SQLite table for after-the-fact review. NEWS_FEED_ENABLED
+  config flag allows disabling this signal to A/B test against the
+  volatility-only baseline. 2 new unit tests added (14/14 passing);
+  re-verified via grep that no order-placing code exists anywhere.
+  News integration is zero-cost (GDELT + keyword heuristic, no LLM
+  classification, no paid APIs). Quality is a known limitation vs. a
+  true NLP/LLM classifier -- flagged as a future upgrade path if
+  paper-trading data suggests the heuristic is too noisy or misses real
+  signal. CAVEAT: this sandbox's network doesn't reach api.gdeltproject.org
+  (same restriction as Kalshi's own API), so the GDELT/Kalshi
+  request-response parsing in news_feed.py has not been exercised
+  against a live call -- verify field names on your own machine before
+  trusting this signal.
 
 ## Known simplifications / open items
+- News-awareness signal is zero-cost (GDELT + keyword heuristic, no LLM
+  classification, no paid APIs). Quality is a known limitation vs. a
+  true NLP/LLM classifier -- expect false positives/negatives; flagged as
+  a future upgrade path if paper-trading data suggests it's too noisy or
+  misses real signal.
 - "My share" of reward score still assumes we're the ONLY provider at our
   exact price level -- overestimates share if others already quote there.
   True fix requires Phase 1 real fills, not fixable in pure simulation.

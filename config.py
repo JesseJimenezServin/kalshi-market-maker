@@ -119,6 +119,38 @@ WIDEN_TICKS_ELEVATED = 2
 MAX_INVENTORY_SKEW_TICKS = 5
 
 # --------------------------------------------------------------------------
+# News-awareness signal (zero-cost, purely advisory)
+# --------------------------------------------------------------------------
+# GDELT's free Doc 2.0 API (no key required) is polled for recent articles
+# whose title/theme tags overlap with keywords derived from each watched
+# market's title/subtitle. This is a coarse rule-based heuristic, NOT an
+# NLP/LLM classifier -- see news_feed.py for the scoring logic and its
+# documented limitations. Set NEWS_FEED_ENABLED = False to disable this
+# signal entirely (e.g. to A/B test against the volatility-only baseline).
+NEWS_FEED_ENABLED = True
+
+GDELT_DOC_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+# How often to poll GDELT for each watched market. In seconds.
+NEWS_POLL_INTERVAL_SEC = 300  # 5 minutes
+
+# How far back (hours) each GDELT query looks for articles.
+NEWS_LOOKBACK_HOURS = 6
+
+# Max number of keywords derived from a market's title/subtitle, used to
+# build the GDELT query and to compute keyword-overlap relevance.
+NEWS_MAX_KEYWORDS = 8
+
+# Fraction of a market's derived keywords that must appear in an article's
+# title/theme tags for that article to be flagged "relevant". Coarse by
+# design -- see news_feed.py's score_relevance() docstring.
+NEWS_RELEVANCE_THRESHOLD = 0.2
+
+# How long (minutes) a relevant news hit keeps the risk engine's
+# news_signal active before it decays back off.
+NEWS_SIGNAL_DECAY_MINUTES = 45
+
+# --------------------------------------------------------------------------
 # Storage
 # --------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent

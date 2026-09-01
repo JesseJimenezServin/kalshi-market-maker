@@ -47,6 +47,7 @@ from adverse_selection_sim import HypotheticalQuote, InventoryState, process_tra
 from logger import SimulationLogger
 import quoting_policy
 from risk_engine import RiskEngine
+from news_feed import news_refresh_loop
 
 logger = logging.getLogger("main")
 
@@ -312,6 +313,7 @@ async def run() -> None:
         ws_client.run_forever(),
         scoring_loop(orderbook_manager, states, sim_logger),
         incentive_refresh_loop(rest_client, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
+        news_refresh_loop(rest_client, states, sim_logger, config.NEWS_POLL_INTERVAL_SEC),
     )
 
 

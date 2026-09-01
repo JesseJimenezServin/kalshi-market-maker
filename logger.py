@@ -71,12 +71,23 @@ CREATE TABLE IF NOT EXISTS simulated_stop_losses (
     reason TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS news_events (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    source_url TEXT,
+    relevance_score REAL NOT NULL,
+    theme_tags TEXT  -- JSON list of tags; may be an empty list, GDELT's
+                     -- ArtList mode doesn't reliably provide these
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts ON orderbook_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_incentive_snap_ticker_ts ON incentive_program_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_news_events_ticker_ts ON news_events(ticker, ts);
 """
 
 
@@ -204,4 +215,21 @@ class SimulationLogger:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, side, price, size,
                  net_yes_contracts_before, net_yes_contracts_after, reason),
+            )
+
+    def log_news_event(
+        self,
+        ticker: str,
+        headline: str,
+        source_url: str,
+        relevance_score: float,
+        theme_tags: list[str],
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO news_events
+                   (ts, ticker, headline, source_url, relevance_score, theme_tags)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, headline, source_url, relevance_score, json.dumps(theme_tags)),
             )

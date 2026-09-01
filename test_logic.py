@@ -11,8 +11,10 @@ from reward_simulator import compute_reference_price, score_hypothetical_order, 
 from adverse_selection_sim import InventoryState, HypotheticalQuote, process_trade_for_inventory
 from incentive_screener import ScreenedProgram
 from main import build_market_states, compute_my_share_at_touched_price
-from risk_engine import RiskEngine, LOW, HIGH
+from risk_engine import RiskEngine, LOW, ELEVATED, HIGH
 from quoting_policy import compute_quote, maybe_execute_stop_loss
+from news_feed import score_relevance
+import config
 
 
 def test_orderbook_snapshot_and_delta():
@@ -244,6 +246,64 @@ def test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise():
     print("test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise: PASS")
 
 
+def test_score_relevance_keyword_overlap():
+    keywords = ["hurricane", "florida", "landfall", "category"]
+
+    # Synthetic GDELT-ArtList-shaped article: title overlaps 3/4 keywords.
+    relevant_article = {
+        "headline": "Hurricane makes landfall in Florida overnight",
+        "source_url": "https://example.com/a",
+        "theme_tags": [],
+    }
+    score = score_relevance(keywords, relevant_article)
+    assert abs(score - 0.75) < 1e-9, score
+    assert score >= config.NEWS_RELEVANCE_THRESHOLD
+
+    # Unrelated article shares none of the keywords -> score 0.
+    unrelated_article = {
+        "headline": "Local bakery wins regional pastry award",
+        "source_url": "https://example.com/b",
+        "theme_tags": [],
+    }
+    assert score_relevance(keywords, unrelated_article) == 0.0
+
+    # Theme tags count toward the overlap too, not just the title.
+    tagged_article = {
+        "headline": "Storm update",
+        "source_url": "https://example.com/c",
+        "theme_tags": ["florida", "category"],
+    }
+    tagged_score = score_relevance(keywords, tagged_article)
+    assert abs(tagged_score - 0.5) < 1e-9, tagged_score
+    print("test_score_relevance_keyword_overlap: PASS")
+
+
+def test_risk_engine_news_signal_escalates_then_decays():
+    engine = RiskEngine(ticker="TEST")
+    inventory = InventoryState(ticker="TEST")
+    t0 = 1_000_000.0
+
+    # Baseline: stable mid, flat inventory, no news yet -> stays LOW.
+    engine.update(50.0, inventory, max_inventory=500, now=t0)
+    assert engine.risk_level == LOW
+    assert engine.news_signal is False
+
+    # A relevant news hit nudges risk up toward ELEVATED even though
+    # volatility/inventory alone would still say LOW.
+    engine.register_news_event(now=t0)
+    engine.update(50.0, inventory, max_inventory=500, now=t0 + 1)
+    assert engine.news_signal is True
+    assert engine.risk_level == ELEVATED, engine.risk_level
+
+    # After the configured decay window has elapsed, the signal expires
+    # and risk level falls back to LOW (inputs otherwise unchanged).
+    decayed_ts = t0 + config.NEWS_SIGNAL_DECAY_MINUTES * 60 + 1
+    engine.update(50.0, inventory, max_inventory=500, now=decayed_ts)
+    assert engine.news_signal is False
+    assert engine.risk_level == LOW, engine.risk_level
+    print("test_risk_engine_news_signal_escalates_then_decays: PASS")
+
+
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_reference_price()
@@ -257,4 +317,6 @@ if __name__ == "__main__":
     test_compute_quote_skews_toward_flattening_long_inventory()
     test_risk_engine_escalates_to_high_on_volatile_mid()
     test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
+    test_score_relevance_keyword_overlap()
+    test_risk_engine_news_signal_escalates_then_decays()
     print("\nALL TESTS PASSED")
