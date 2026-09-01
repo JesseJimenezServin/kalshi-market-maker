@@ -32,7 +32,7 @@ from auth import KalshiSigner
 from rest_client import KalshiRestClient
 from orderbook import OrderbookManager
 from ws_client import KalshiWebSocketClient
-from incentive_screener import screen_incentive_programs, print_report
+from incentive_screener import ScreenedProgram, screen_incentive_programs, print_report
 from reward_simulator import score_both_sides
 from adverse_selection_sim import HypotheticalQuote, InventoryState, process_trade_for_inventory
 from logger import SimulationLogger
@@ -72,6 +72,64 @@ class MarketRuntimeState:
             no_price=best_no[0],
             no_size=config.DEFAULT_SIMULATED_QUOTE_SIZE,
         )
+
+
+def build_market_states(
+    watched_tickers: list[str],
+    screened_programs: list[ScreenedProgram],
+) -> dict[str, MarketRuntimeState]:
+    """
+    Looks up each watched ticker in the live incentive-screener results and
+    initializes MarketRuntimeState with that market's REAL target_size and
+    discount_factor (converted from bps to a 0-1 decimal). Watched tickers
+    with no active incentive program are logged and skipped -- there's no
+    live program to simulate scoring against.
+    """
+    screened_by_ticker = {p.market_ticker: p for p in screened_programs}
+
+    states: dict[str, MarketRuntimeState] = {}
+    for ticker in watched_tickers:
+        program = screened_by_ticker.get(ticker)
+        if program is None:
+            logger.warning(
+                "%s: no active incentive program found -- skipping (won't simulate scoring for this market).",
+                ticker,
+            )
+            continue
+        states[ticker] = MarketRuntimeState(
+            ticker,
+            target_size=program.target_size,
+            discount_factor=program.discount_factor_bps / 10000.0,
+        )
+    return states
+
+
+def compute_my_share_at_touched_price(
+    book,
+    quote: HypotheticalQuote,
+    trade_yes_price: int,
+    taker_side: str,
+) -> float:
+    """
+    Estimates our hypothetical share of the exact price level a real trade
+    touched, using the same "merge my size into the existing resting size"
+    pattern as reward_simulator.score_hypothetical_order.
+
+    taker_side == "no": the aggressor sold yes, touching the YES side at
+    trade_yes_price. taker_side == "yes": the aggressor bought yes, touching
+    the NO side at (100 - trade_yes_price).
+    """
+    if taker_side == "no":
+        existing_resting_size = book.yes_levels.get(trade_yes_price, 0)
+        my_quote_size = quote.yes_size
+    else:
+        existing_resting_size = book.no_levels.get(100 - trade_yes_price, 0)
+        my_quote_size = quote.no_size
+
+    denominator = existing_resting_size + my_quote_size
+    if denominator <= 0:
+        return 0.0
+    return my_quote_size / denominator
 
 
 async def scoring_loop(
@@ -140,7 +198,11 @@ async def incentive_refresh_loop(rest_client: KalshiRestClient, interval_sec: fl
         await asyncio.sleep(interval_sec)
 
 
-def make_trade_handler(states: dict[str, MarketRuntimeState], sim_logger: SimulationLogger):
+def make_trade_handler(
+    orderbook_manager: OrderbookManager,
+    states: dict[str, MarketRuntimeState],
+    sim_logger: SimulationLogger,
+):
     async def on_trade(trade_msg: dict) -> None:
         ticker = trade_msg.get("market_ticker")
         state = states.get(ticker)
@@ -153,11 +215,13 @@ def make_trade_handler(states: dict[str, MarketRuntimeState], sim_logger: Simula
         if trade_yes_price is None or not trade_count or taker_side is None:
             return
 
-        # Simplification: assume our hypothetical share of the touched
-        # price level is proportional to our configured quote size vs.
-        # the size that was resting there. Without that book snapshot at
-        # trade time we fall back to a conservative fixed estimate.
-        my_share_estimate = 0.15  # placeholder -- tune using Phase 1 real fill data
+        book = orderbook_manager.books.get(ticker)
+        if book is None:
+            return
+
+        my_share_estimate = compute_my_share_at_touched_price(
+            book, state.quote, trade_yes_price, taker_side
+        )
 
         process_trade_for_inventory(
             inventory=state.inventory,
@@ -196,20 +260,17 @@ async def run() -> None:
     orderbook_manager = OrderbookManager()
     sim_logger = SimulationLogger()
 
-    # Bootstrap per-market state with placeholder target size / discount
-    # factor; the incentive_refresh_loop below will keep the screener
-    # informed, but for now we seed reasonable defaults if a market isn't
-    # found in the live incentive list.
-    states: dict[str, MarketRuntimeState] = {
-        ticker: MarketRuntimeState(ticker, target_size=1000.0, discount_factor=0.9)
-        for ticker in config.WATCHED_MARKET_TICKERS
-    }
+    # Seed per-market state with the REAL target_size / discount_factor from
+    # the live incentive screener. Watched tickers with no active program
+    # are logged and skipped -- we don't simulate scoring for them.
+    screened = screen_incentive_programs(rest_client)
+    states = build_market_states(config.WATCHED_MARKET_TICKERS, screened)
 
     ws_client = KalshiWebSocketClient(
         tickers=config.WATCHED_MARKET_TICKERS,
         orderbook_manager=orderbook_manager,
         signer=signer,
-        on_trade=make_trade_handler(states, sim_logger),
+        on_trade=make_trade_handler(orderbook_manager, states, sim_logger),
     )
 
     logger.info("Starting Phase 0 paper-trading pipeline (NO live orders will be placed).")

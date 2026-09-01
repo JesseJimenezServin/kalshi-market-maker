@@ -4,9 +4,13 @@ reconstruction, the reward-scoring formula, and the inventory simulator.
 Run with: python3 test_logic.py
 """
 
+from datetime import datetime, timezone
+
 from orderbook import OrderbookManager, MarketBook
 from reward_simulator import compute_reference_price, score_hypothetical_order, score_both_sides
 from adverse_selection_sim import InventoryState, HypotheticalQuote, process_trade_for_inventory
+from incentive_screener import ScreenedProgram
+from main import build_market_states, compute_my_share_at_touched_price
 
 
 def test_orderbook_snapshot_and_delta():
@@ -127,6 +131,49 @@ def test_process_trade_for_inventory_end_to_end():
     print("test_process_trade_for_inventory_end_to_end: PASS")
 
 
+def test_build_market_states_uses_real_incentive_program_values():
+    program = ScreenedProgram(
+        market_ticker="FOUND-TICKER",
+        period_reward=500.0,
+        target_size=750.0,
+        discount_factor_bps=8500,
+        end_date=datetime.now(timezone.utc),
+        days_remaining=3.0,
+        reward_density_score=1.0,
+        raw={},
+    )
+
+    states = build_market_states(
+        watched_tickers=["FOUND-TICKER", "MISSING-TICKER"],
+        screened_programs=[program],
+    )
+
+    assert "FOUND-TICKER" in states
+    assert states["FOUND-TICKER"].target_size == 750.0
+    assert abs(states["FOUND-TICKER"].discount_factor - 0.85) < 1e-9
+
+    # No active program for this ticker -> should be skipped, not defaulted.
+    assert "MISSING-TICKER" not in states
+    print("test_build_market_states_uses_real_incentive_program_values: PASS")
+
+
+def test_compute_my_share_at_touched_price_level():
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 100]], no=[[48, 40]])
+    quote = HypotheticalQuote(yes_price=50, yes_size=100, no_price=48, no_size=100)
+
+    # taker_side "no" touches the YES side at trade_yes_price=50, where 100
+    # is already resting -- our hypothetical 100 should be exactly half.
+    share_yes_side = compute_my_share_at_touched_price(book, quote, trade_yes_price=50, taker_side="no")
+    assert abs(share_yes_side - 0.5) < 1e-9, share_yes_side
+
+    # taker_side "yes" touches the NO side at (100 - 48) = 52, where
+    # nothing is resting -- our hypothetical size should be the whole share.
+    share_no_side = compute_my_share_at_touched_price(book, quote, trade_yes_price=48, taker_side="yes")
+    assert abs(share_no_side - 1.0) < 1e-9, share_no_side
+    print("test_compute_my_share_at_touched_price_level: PASS")
+
+
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_reference_price()
@@ -135,4 +182,6 @@ if __name__ == "__main__":
     test_inventory_yes_fill_and_pnl()
     test_inventory_respects_max_position()
     test_process_trade_for_inventory_end_to_end()
+    test_build_market_states_uses_real_incentive_program_values()
+    test_compute_my_share_at_touched_price_level()
     print("\nALL TESTS PASSED")
