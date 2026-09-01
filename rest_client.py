@@ -19,6 +19,9 @@ from auth import KalshiSigner
 
 logger = logging.getLogger(__name__)
 
+if config.is_read_only_mode():
+    logger.info("Running in READ-ONLY mode (Phase 0) -- no orders can be placed.")
+
 # Kalshi's signed path must match the REST path prefix, not the fully
 # qualified URL. e.g. base "https://api.elections.kalshi.com/trade-api/v2"
 # -> signed path prefix "/trade-api/v2"
@@ -26,6 +29,11 @@ _PATH_PREFIX = "/trade-api/v2"
 
 
 class KalshiRestClient:
+    # Structural safety guard: this client may only ever issue GET
+    # requests. Phase 0 is read-only by design (config.is_read_only_mode());
+    # this makes that explicit and enforced, not just a comment.
+    ALLOWED_METHODS = {"GET"}
+
     def __init__(self, signer: KalshiSigner | None = None, base_url: str | None = None):
         # signer is optional: some endpoints (e.g. public market listings)
         # may work unauthenticated, but Kalshi's own guidance is that it's
@@ -38,6 +46,9 @@ class KalshiRestClient:
         """
         `path` should be like "/markets" (relative to /trade-api/v2).
         """
+        method = "GET"
+        assert method in self.ALLOWED_METHODS, f"{method} is not an allowed method -- this client is read-only."
+
         full_path = f"{_PATH_PREFIX}{path}"
         url = f"{self.base_url}{path}"
 

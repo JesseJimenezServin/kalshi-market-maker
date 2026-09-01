@@ -27,6 +27,15 @@ import asyncio
 import logging
 import time
 
+# Configured before the imports below so that any import-time log lines
+# (e.g. rest_client's read-only-mode startup notice) are actually emitted
+# with the intended format, instead of being silently dropped by Python's
+# default no-handlers-configured logging behavior.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+
 import config
 from auth import KalshiSigner
 from rest_client import KalshiRestClient
@@ -37,10 +46,6 @@ from reward_simulator import score_both_sides
 from adverse_selection_sim import HypotheticalQuote, InventoryState, process_trade_for_inventory
 from logger import SimulationLogger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
 logger = logging.getLogger("main")
 
 
@@ -145,6 +150,12 @@ async def scoring_loop(
             if book is None or book.stale:
                 continue
 
+            sim_logger.log_orderbook_snapshot(
+                ticker=ticker,
+                yes_levels=book.yes_side_sorted_desc(),
+                no_levels=book.no_side_sorted_desc(),
+            )
+
             state.refresh_quote_from_book(book)
             if state.quote is None:
                 continue
@@ -187,12 +198,25 @@ async def scoring_loop(
         await asyncio.sleep(interval_sec)
 
 
-async def incentive_refresh_loop(rest_client: KalshiRestClient, interval_sec: float) -> None:
+async def incentive_refresh_loop(
+    rest_client: KalshiRestClient,
+    sim_logger: SimulationLogger,
+    interval_sec: float,
+) -> None:
     while True:
         try:
             results = screen_incentive_programs(rest_client)
             logger.info("Incentive screen refreshed: %d active liquidity programs found", len(results))
             print_report(results)
+            for program in results:
+                if program.market_ticker in config.WATCHED_MARKET_TICKERS:
+                    sim_logger.log_incentive_program_snapshot(
+                        ticker=program.market_ticker,
+                        period_reward=program.period_reward,
+                        target_size=program.target_size,
+                        discount_factor_bps=program.discount_factor_bps,
+                        days_remaining=program.days_remaining,
+                    )
         except Exception:
             logger.exception("Incentive screen failed")
         await asyncio.sleep(interval_sec)
@@ -278,7 +302,7 @@ async def run() -> None:
     await asyncio.gather(
         ws_client.run_forever(),
         scoring_loop(orderbook_manager, states, sim_logger),
-        incentive_refresh_loop(rest_client, config.INCENTIVE_POLL_INTERVAL_SEC),
+        incentive_refresh_loop(rest_client, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
     )
 
 

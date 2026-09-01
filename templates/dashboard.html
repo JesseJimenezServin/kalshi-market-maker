@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Kalshi Liquidity Lab -- Phase 0 Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #12181f;
+    --border: #232b34;
+    --text: #d7dde3;
+    --muted: #7d8894;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 13px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  header h1 {
+    font-size: 15px;
+    margin: 0;
+    color: var(--text);
+    font-weight: 600;
+  }
+  .status-bar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .status-item { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); }
+  .dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .dot.warn { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  .badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge.demo { color: var(--yellow); border-color: var(--yellow); }
+  .badge.prod { color: var(--accent); border-color: var(--accent); }
+  .badge.readonly { color: var(--green); border-color: var(--green); }
+
+  main {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 16px;
+    padding: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    min-width: 0;
+  }
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 0 0 10px 0;
+    font-weight: 600;
+  }
+  .span-2 { grid-column: 1 / span 2; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 5px 8px; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody tr { border-bottom: 1px solid #1a2129; }
+  tbody tr:hover { background: #161d25; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .muted { color: var(--muted); }
+
+  select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 12px;
+  }
+
+  .depth-wrap { display: flex; gap: 16px; margin-top: 8px; }
+  .depth-col { flex: 1; min-width: 0; }
+  .depth-col h3 { font-size: 11px; color: var(--muted); margin: 0 0 6px 0; text-transform: uppercase; }
+  .depth-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; font-size: 12px; }
+  .depth-price { width: 42px; flex-shrink: 0; }
+  .depth-size { width: 48px; flex-shrink: 0; text-align: right; color: var(--muted); }
+  .depth-bar-track { flex: 1; height: 14px; background: #1a2129; border-radius: 2px; overflow: hidden; }
+  .depth-bar { height: 100%; }
+  .depth-bar.yes { background: var(--green); }
+  .depth-bar.no { background: var(--red); }
+
+  .empty-state { color: var(--muted); padding: 20px 0; text-align: center; }
+
+  footer {
+    padding: 10px 18px;
+    color: var(--muted);
+    font-size: 11px;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Kalshi Liquidity Lab &mdash; Phase 0 Dashboard</h1>
+  <div class="status-bar">
+    <span class="status-item"><span id="ws-dot" class="dot"></span><span id="ws-status">connecting...</span></span>
+    <span class="status-item">latency: <span id="latency">--</span> ms</span>
+    <span class="status-item">env: <span id="env-badge" class="badge">--</span></span>
+    <span class="status-item"><span id="readonly-badge" class="badge readonly">read-only</span></span>
+  </div>
+</header>
+
+<main>
+  <section class="panel span-2">
+    <h2>Watched Markets</h2>
+    <table id="markets-table">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Target Size</th>
+          <th>Discount Factor</th>
+          <th>Daily Pool ($)</th>
+          <th>Combined Score</th>
+          <th>Net P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="6" class="empty-state">Waiting for data...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Order Book Depth <select id="depth-ticker-select"></select></h2>
+    <div id="depth-container" class="depth-wrap">
+      <div class="empty-state">No order book data yet.</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Recent Simulated Fills</h2>
+    <table id="fills-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Ticker</th>
+          <th>Side</th>
+          <th>Price</th>
+          <th>Size</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="5" class="empty-state">No fills yet.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel span-2">
+    <h2>Reward Score (proxy) vs Simulated P&amp;L ($)</h2>
+    <canvas id="performance-chart" height="90"></canvas>
+    <div class="muted" style="margin-top:6px; font-size:11px;">
+      Reward score is a unitless cumulative proxy (sum of per-snapshot combined score), not a dollar
+      figure -- Kalshi's real USD payout pools every participant's score over the period, which isn't
+      reconstructable from public data alone. P&amp;L is the simulated mark-to-market total in dollars.
+    </div>
+  </section>
+</main>
+
+<footer>
+  Phase 0 is read-only: no orders are ever placed by this codebase. This dashboard only reads
+  data/paper_trading.sqlite.
+</footer>
+
+<script>
+let lastPayload = null;
+let selectedTicker = null;
+let chart = null;
+
+function fmt(n, digits = 2) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  return Number(n).toFixed(digits);
+}
+
+function pnlClass(n) {
+  if (n === null || n === undefined) return "muted";
+  return n > 0 ? "pos" : (n < 0 ? "neg" : "");
+}
+
+function renderMarketsTable(markets) {
+  const tbody = document.querySelector("#markets-table tbody");
+  if (!markets || markets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No watched markets yet -- add tickers to config.py.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = markets.map(m => `
+    <tr>
+      <td>${m.ticker}</td>
+      <td>${m.target_size !== null ? fmt(m.target_size, 0) : '<span class="muted">no active program</span>'}</td>
+      <td>${m.discount_factor !== null ? fmt(m.discount_factor, 4) : "--"}</td>
+      <td>${m.daily_pool !== null ? "$" + fmt(m.daily_pool, 2) : "--"}</td>
+      <td>${m.combined_score !== null ? fmt(m.combined_score, 4) : "--"}</td>
+      <td class="${pnlClass(m.net_pnl)}">${m.net_pnl !== null ? "$" + fmt(m.net_pnl, 2) : "--"}</td>
+    </tr>
+  `).join("");
+}
+
+function renderFillsTable(fills) {
+  const tbody = document.querySelector("#fills-table tbody");
+  if (!fills || fills.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No fills yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = fills.map(f => `
+    <tr>
+      <td>${new Date(f.ts * 1000).toLocaleTimeString()}</td>
+      <td>${f.ticker}</td>
+      <td class="${f.side === 'yes' ? 'pos' : 'neg'}">${f.side.toUpperCase()}</td>
+      <td>${f.price}c</td>
+      <td>${f.size}</td>
+    </tr>
+  `).join("");
+}
+
+function updateTickerSelect(markets) {
+  const select = document.getElementById("depth-ticker-select");
+  const tickers = markets.map(m => m.ticker);
+  const currentOptions = Array.from(select.options).map(o => o.value);
+  if (currentOptions.join(",") !== tickers.join(",")) {
+    select.innerHTML = tickers.map(t => `<option value="${t}">${t}</option>`).join("");
+  }
+  if (!selectedTicker || !tickers.includes(selectedTicker)) {
+    selectedTicker = tickers[0] || null;
+  }
+  select.value = selectedTicker || "";
+}
+
+function renderDepth(markets) {
+  const container = document.getElementById("depth-container");
+  const market = markets.find(m => m.ticker === selectedTicker);
+  if (!market || !market.orderbook) {
+    container.innerHTML = '<div class="empty-state">No order book data yet for this market.</div>';
+    return;
+  }
+  const { yes_levels, no_levels } = market.orderbook;
+  const maxSize = Math.max(1, ...yes_levels.map(l => l[1]), ...no_levels.map(l => l[1]));
+
+  const renderCol = (title, levels, cls) => `
+    <div class="depth-col">
+      <h3>${title}</h3>
+      ${levels.length === 0 ? '<div class="muted">no resting size</div>' : levels.map(([price, size]) => `
+        <div class="depth-row">
+          <span class="depth-price">${price}c</span>
+          <div class="depth-bar-track"><div class="depth-bar ${cls}" style="width:${(size / maxSize) * 100}%"></div></div>
+          <span class="depth-size">${size}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+
+  container.innerHTML = renderCol("YES bids", yes_levels, "yes") + renderCol("NO bids", no_levels, "no");
+}
+
+function initChart() {
+  const ctx = document.getElementById("performance-chart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [
+      {
+        label: "Cumulative Reward Score (proxy)",
+        data: [],
+        borderColor: "#58a6ff",
+        backgroundColor: "transparent",
+        yAxisID: "y",
+        pointRadius: 0,
+        tension: 0.15,
+      },
+      {
+        label: "Simulated P&L ($)",
+        data: [],
+        borderColor: "#f85149",
+        backgroundColor: "transparent",
+        yAxisID: "y1",
+        pointRadius: 0,
+        tension: 0.15,
+      },
+    ]},
+    options: {
+      animation: false,
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: "#7d8894", maxTicksLimit: 10 }, grid: { color: "#1a2129" } },
+        y: { position: "left", ticks: { color: "#58a6ff" }, grid: { color: "#1a2129" }, title: { display: true, text: "Reward score (proxy)", color: "#58a6ff" } },
+        y1: { position: "right", ticks: { color: "#f85149" }, grid: { display: false }, title: { display: true, text: "P&L ($)", color: "#f85149" } },
+      },
+      plugins: { legend: { labels: { color: "#d7dde3" } } },
+    },
+  });
+}
+
+function renderChart(history) {
+  if (!chart) return;
+  const rewardSeries = history.reward_score || [];
+  const pnlSeries = history.pnl_dollars || [];
+  const longer = rewardSeries.length >= pnlSeries.length ? rewardSeries : pnlSeries;
+  chart.data.labels = longer.map((_, i) => i);
+  chart.data.datasets[0].data = rewardSeries.map(p => p.value);
+  chart.data.datasets[1].data = pnlSeries.map(p => p.value);
+  chart.update();
+}
+
+function setWsStatus(state) {
+  const dot = document.getElementById("ws-dot");
+  const label = document.getElementById("ws-status");
+  dot.className = "dot " + (state === "ok" ? "ok" : state === "warn" ? "warn" : "bad");
+  label.textContent = state === "ok" ? "connected" : state === "warn" ? "connecting..." : "disconnected";
+}
+
+function connect() {
+  setWsStatus("warn");
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+
+  ws.onopen = () => setWsStatus("ok");
+  ws.onclose = () => { setWsStatus("bad"); setTimeout(connect, 2000); };
+  ws.onerror = () => setWsStatus("bad");
+
+  ws.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    lastPayload = payload;
+
+    document.getElementById("latency").textContent = Math.max(0, Math.round(Date.now() - payload.server_ts * 1000));
+    const envBadge = document.getElementById("env-badge");
+    envBadge.textContent = payload.environment;
+    envBadge.className = "badge " + (payload.environment === "prod" ? "prod" : "demo");
+
+    renderMarketsTable(payload.markets);
+    updateTickerSelect(payload.markets);
+    renderDepth(payload.markets);
+    renderFillsTable(payload.recent_fills);
+    renderChart(payload.performance_history);
+  };
+}
+
+document.getElementById("depth-ticker-select").addEventListener("change", (e) => {
+  selectedTicker = e.target.value;
+  if (lastPayload) renderDepth(lastPayload.markets);
+});
+
+initChart();
+connect();
+</script>
+
+</body>
+</html>

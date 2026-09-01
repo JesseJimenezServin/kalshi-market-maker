@@ -6,6 +6,7 @@ everything in memory.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -43,9 +44,27 @@ CREATE TABLE IF NOT EXISTS inventory_marks (
     realized_pnl_cents REAL
 );
 
+CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    yes_levels TEXT NOT NULL,  -- JSON list of [price_cents, size]
+    no_levels TEXT NOT NULL    -- JSON list of [price_cents, size]
+);
+
+CREATE TABLE IF NOT EXISTS incentive_program_snapshots (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    period_reward REAL,
+    target_size REAL,
+    discount_factor_bps INTEGER,
+    days_remaining REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts ON orderbook_snapshots(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_incentive_snap_ticker_ts ON incentive_program_snapshots(ticker, ts);
 """
 
 
@@ -122,4 +141,34 @@ class SimulationLogger:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, net_yes_contracts, avg_entry_price, mid_price,
                  unrealized_pnl_cents, realized_pnl_cents),
+            )
+
+    def log_orderbook_snapshot(
+        self,
+        ticker: str,
+        yes_levels: list[tuple[int, int]],
+        no_levels: list[tuple[int, int]],
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO orderbook_snapshots (ts, ticker, yes_levels, no_levels) VALUES (?, ?, ?, ?)",
+                (ts or time.time(), ticker, json.dumps(yes_levels), json.dumps(no_levels)),
+            )
+
+    def log_incentive_program_snapshot(
+        self,
+        ticker: str,
+        period_reward: float,
+        target_size: float,
+        discount_factor_bps: int,
+        days_remaining: float,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO incentive_program_snapshots
+                   (ts, ticker, period_reward, target_size, discount_factor_bps, days_remaining)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, period_reward, target_size, discount_factor_bps, days_remaining),
             )

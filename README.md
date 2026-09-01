@@ -89,7 +89,21 @@ Let it run for a while — ideally the full 1–2 week window we discussed —
 to gather enough data across different market regimes (quiet periods and
 at least one volatility event) to be meaningful.
 
-## Step 4 — analyze results
+## Step 4 — watch it live in the dashboard
+
+```bash
+python3 server.py
+```
+
+Then open http://127.0.0.1:8000/ in a browser. This is a read-only FastAPI
+server that streams live updates from `data/paper_trading.sqlite` over a
+WebSocket once per second -- it never talks to Kalshi and places no orders.
+It shows the watched markets table (target size, discount factor, daily
+pool, net P&L), order book depth bars, a recent-fills table, and a
+performance chart. Safe to run alongside `main.py` at any time (or on its
+own, before you've collected any data).
+
+## Step 5 — analyze results
 
 Query `data/paper_trading.sqlite` directly, e.g.:
 
@@ -126,12 +140,12 @@ several quiet weeks, that market is a candidate for the small live pilot
    liquidity providers are already resting at your exact price. Treat
    Phase 0 reward numbers as an optimistic upper bound, not a guarantee.
 
-2. **Fill-probability heuristic in adverse-selection sim.** `main.py`
-   currently uses a fixed placeholder (`my_share_estimate = 0.15`) for
-   how much of each trade print we'd have captured. This should be
-   replaced with a book-state-aware calculation (using the resting size
-   at the touched price level at the moment of the trade) before trusting
-   the P&L numbers quantitatively — directionally useful now, not exact.
+2. **Fill-probability heuristic in adverse-selection sim.** `main.py` now
+   computes `my_share_estimate` from the live resting size at the exact
+   touched price level at the moment of the trade (see
+   `compute_my_share_at_touched_price` in `main.py`), rather than a fixed
+   placeholder. It still shares the same overestimation caveat as #1
+   above (assumes we're the only provider at that price).
 
 3. **Quoting policy is naive.** `MarketRuntimeState.refresh_quote_from_book`
    just joins the best bid on both sides. It doesn't yet implement
@@ -139,12 +153,11 @@ several quiet weeks, that market is a candidate for the small live pilot
    intentional for Phase 0 — we want a simple baseline to measure, and to
    improve on once we see where the naive policy struggles.
 
-4. **Target Size / Discount Factor defaults.** `main.py` seeds each
-   watched market with placeholder values (`target_size=1000,
-   discount_factor=0.9`) rather than pulling the real per-market values
-   from the incentive screener automatically. Wire `screen_incentive_programs`
-   output into `MarketRuntimeState` before trusting absolute numbers —
-   right now the screener and the scoring loop run independently.
+4. **Target Size / Discount Factor.** `main.py` now seeds each watched
+   market's `MarketRuntimeState` with the real `target_size` and
+   `discount_factor` pulled live from `screen_incentive_programs` at
+   startup (see `build_market_states` in `main.py`). Watched tickers with
+   no active incentive program are skipped, not defaulted.
 
 None of these are hard to fix — they're flagged so Phase 0's numbers are
 read correctly (as a promising/discouraging *signal*, not a precise
@@ -164,4 +177,6 @@ forecast) while we tighten the model with real observed data.
 | `adverse_selection_sim.py` | Hypothetical inventory + P&L from trade flow |
 | `logger.py` | SQLite persistence |
 | `main.py` | Orchestrates everything |
+| `server.py` | Read-only FastAPI dashboard, streams `data/paper_trading.sqlite` over `/ws` |
+| `templates/dashboard.html` | Dashboard single-page UI (markets, depth, fills, chart) |
 | `test_logic.py` | Offline unit tests (no network needed) |

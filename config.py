@@ -41,6 +41,20 @@ KALSHI_API_KEY_ID = os.getenv("KALSHI_API_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
 
 # --------------------------------------------------------------------------
+# Safety: read-only mode
+# --------------------------------------------------------------------------
+def is_read_only_mode() -> bool:
+    """
+    Structural safety guard, not a runtime toggle. Phase 0 is read-only by
+    design -- no orders are ever placed, amended, or canceled, regardless
+    of which Kalshi environment (demo/prod) or credentials are configured.
+    Hardcoded True until Phase 1 (a small, deliberately-built live pilot)
+    exists.
+    """
+    return True
+
+
+# --------------------------------------------------------------------------
 # Market universe
 # --------------------------------------------------------------------------
 # Start with an explicit, small list of market tickers to watch while we
