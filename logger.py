@@ -1,0 +1,125 @@
+"""
+Persists Phase 0 simulation output to SQLite so we can run an analysis
+pass after a data-collection window (days/weeks) without keeping
+everything in memory.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from contextlib import contextmanager
+
+import config
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS snapshot_scores (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    qualifies_yes INTEGER,
+    qualifies_no INTEGER,
+    my_share_yes REAL,
+    my_share_no REAL,
+    combined_score REAL,
+    reference_price_yes INTEGER,
+    reference_price_no INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS simulated_fills (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    price INTEGER NOT NULL,
+    size INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inventory_marks (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    net_yes_contracts INTEGER,
+    avg_entry_price REAL,
+    mid_price REAL,
+    unrealized_pnl_cents REAL,
+    realized_pnl_cents REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
+"""
+
+
+class SimulationLogger:
+    def __init__(self, db_path=None):
+        self.db_path = str(db_path or config.DB_PATH)
+        self._init_schema()
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _init_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(SCHEMA)
+
+    def log_snapshot_score(
+        self,
+        ticker: str,
+        qualifies_yes: bool,
+        qualifies_no: bool,
+        my_share_yes: float,
+        my_share_no: float,
+        reference_price_yes: int | None,
+        reference_price_no: int | None,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO snapshot_scores
+                   (ts, ticker, qualifies_yes, qualifies_no, my_share_yes, my_share_no,
+                    combined_score, reference_price_yes, reference_price_no)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ts or time.time(),
+                    ticker,
+                    int(qualifies_yes),
+                    int(qualifies_no),
+                    my_share_yes,
+                    my_share_no,
+                    my_share_yes + my_share_no,
+                    reference_price_yes,
+                    reference_price_no,
+                ),
+            )
+
+    def log_simulated_fill(self, ticker: str, side: str, price: int, size: int, ts: float | None = None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO simulated_fills (ts, ticker, side, price, size) VALUES (?, ?, ?, ?, ?)",
+                (ts or time.time(), ticker, side, price, size),
+            )
+
+    def log_inventory_mark(
+        self,
+        ticker: str,
+        net_yes_contracts: int,
+        avg_entry_price: float,
+        mid_price: float,
+        unrealized_pnl_cents: float,
+        realized_pnl_cents: float,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO inventory_marks
+                   (ts, ticker, net_yes_contracts, avg_entry_price, mid_price,
+                    unrealized_pnl_cents, realized_pnl_cents)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, net_yes_contracts, avg_entry_price, mid_price,
+                 unrealized_pnl_cents, realized_pnl_cents),
+            )

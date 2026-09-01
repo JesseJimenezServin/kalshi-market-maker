@@ -1,0 +1,7 @@
+.env
+*.pem
+*.key
+venv/
+data/*.sqlite
+logs/
+__pycache__/
