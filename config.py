@@ -73,7 +73,34 @@ WATCHED_MARKET_TICKERS: list[str] = [
     # found and fixed two real bugs: a broken resync request, and a
     # shared-vs-per-ticker sequence tracking bug -- see PROJECT_STATUS.md
     # and git history). Back to just the quiet-market thesis test above.
+    #
+    # NOTE (2026-09-02): with AUTO_SELECT_WATCHLIST=True below (the
+    # default), this manual list is no longer what actually runs --
+    # main.py picks its own watch list live at startup instead. This list
+    # is now only a FALLBACK, used only if AUTO_SELECT_WATCHLIST is turned
+    # off, or there are no active incentive programs at all to
+    # auto-select from.
 ]
+
+# --------------------------------------------------------------------------
+# Fully autonomous watch-list selection
+# --------------------------------------------------------------------------
+# If True, main.py picks its own watch list at startup via
+# incentive_screener.select_watchlist -- the crowding-aware ranking (see
+# screen_incentive_programs' adjusted_score) -- instead of the manual
+# WATCHED_MARKET_TICKERS list above. This ranking dampens for real
+# crowding/volatility but never hard-disqualifies on it (CONFIRMED live
+# 2026-09-02: every currently active incentive program is already
+# well-crowded, least-crowded observed ~8.9x target_size -- a hard
+# cutoff would always find nothing), so it always picks the least-bad
+# N available rather than nothing. Falls back to WATCHED_MARKET_TICKERS
+# only if there are no active incentive programs at all. Runtime-only,
+# same as the market switcher: a restart re-runs selection from scratch,
+# it does not persist or rewrite WATCHED_MARKET_TICKERS.
+AUTO_SELECT_WATCHLIST = True
+
+# How many markets to auto-select and watch at once.
+NUM_MARKETS_TO_WATCH = 3
 
 # How often to poll REST endpoints that don't have a WebSocket equivalent
 # (e.g. incentive program listings). In seconds.
@@ -182,11 +209,6 @@ MARKET_SWITCHER_ENABLED = True
 # "crowded" -- diminishing marginal share for a new entrant. 1.0 means
 # real depth alone already equals the qualification threshold.
 CROWDING_RATIO_THRESHOLD = 3.0
-
-# A candidate replacement market must be at/below this crowding ratio
-# (checked via a single live get_orderbook call, not extended
-# observation) to be considered under-served enough to switch into.
-SWITCH_CANDIDATE_MAX_CROWDING_RATIO = 1.0
 
 # How long (seconds) a trigger condition (HIGH risk or crowded) must hold
 # CONTINUOUSLY before acting -- avoids switching on a single noisy tick.

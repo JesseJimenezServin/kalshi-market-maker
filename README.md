@@ -52,22 +52,36 @@ export KALSHI_API_KEY_ID="your-key-id"
 export KALSHI_PRIVATE_KEY_PATH="/path/to/your/private_key.pem"
 ```
 
-## Step 1 — find markets worth watching
+## Step 1 — (optional) preview what the pipeline would pick
 
 ```bash
 python3 incentive_screener.py
 ```
 
 This lists currently-active Liquidity Incentive Program markets, ranked by
-a rough reward-density heuristic (reward per day ÷ required Target Size).
-Pick a handful that look interesting — ideally lower-volatility markets
-without scheduled news in the near term (see the strategy notes we
-discussed: weather, slow-moving economic ranges, non-marquee sports
-pre-game, etc.).
+a crowding-aware adjusted score (reward density, dampened for real
+resting depth and recent trade-price volatility — see
+`incentive_screener.py`). You don't need to act on this manually: by
+default (`config.AUTO_SELECT_WATCHLIST = True`), `main.py` runs this same
+ranking itself at startup and picks its own watch list — see Step 2.
+Running it yourself first is just a way to preview what it'll likely
+choose, or to sanity-check the ranking.
 
-## Step 2 — configure the watch list
+## Step 2 — watch list: autonomous by default, manual as a fallback
 
-Edit `config.py` and add the tickers you picked to `WATCHED_MARKET_TICKERS`.
+With `config.AUTO_SELECT_WATCHLIST = True` (the default), `main.py`
+autonomously selects `config.NUM_MARKETS_TO_WATCH` markets at startup via
+`incentive_screener.select_watchlist` — each candidate's REAL crowding
+ratio must be at/below `config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO`, the
+same bar `market_switcher.py` requires of a replacement later, so day-0
+selection and later mid-run switches use one consistent standard. No
+manual curation needed. This is runtime-only, like the market switcher
+below — a restart re-runs selection from scratch.
+
+If auto-selection finds nothing eligible (or `AUTO_SELECT_WATCHLIST` is
+set to `False`), it falls back to the manual `config.py`
+`WATCHED_MARKET_TICKERS` list — edit that list yourself if you want a
+fixed, hand-picked watch list instead.
 
 ## Step 3 — run the paper-trading pipeline
 

@@ -30,7 +30,7 @@ import logging
 import time
 
 import config
-from incentive_screener import ScreenedProgram, screen_incentive_programs
+from incentive_screener import ScreenedProgram, screen_incentive_programs, _adjusted_score
 from orderbook import MarketBook, fp_to_size
 from rest_client import KalshiRestClient
 from risk_engine import HIGH
@@ -114,9 +114,10 @@ class MarketSwitcher:
         available would re-run the full search every check interval
         indefinitely -- OBSERVED LIVE 2026-09-02: both watched markets
         were far more crowded (12x/23x target_size) than any candidate
-        under SWITCH_CANDIDATE_MAX_CROWDING_RATIO, so find_replacement
-        kept returning None and the search re-ran every ~30-40s
-        continuously, hammering the REST API for as long as the
+        cleared the then-strict absolute crowding cutoff (since removed
+        -- see find_replacement), so find_replacement kept returning
+        None and the search re-ran every ~30-40s continuously, hammering
+        the REST API for as long as the
         condition held instead of respecting the cooldown.
         """
         self._last_switch_ts = now if now is not None else time.time()
@@ -137,13 +138,28 @@ def find_replacement(
     """
     Re-screens active incentive programs (ranked by the existing
     reward-density heuristic), skipping anything already watched, and
-    returns the first candidate whose REAL crowding ratio is at/below
-    config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO. None if none qualify
-    among the top `max_candidates_to_check` reward-dense candidates.
+    returns whichever of the top `max_candidates_to_check` reward-dense
+    candidates has the best crowding-adjusted score (see
+    incentive_screener._adjusted_score) -- CONFIRMED live 2026-09-02:
+    every currently active incentive program was already well-crowded
+    (least-crowded observed was ~8.9x target_size), so an earlier design
+    that hard-required crowding at/below a strict absolute threshold
+    always returned None here, meaning a switch could never actually
+    complete. This always returns the LEAST-crowded available candidate
+    instead -- dampened, never disqualified, by real crowding -- so a
+    switch can still happen even when nothing is genuinely uncrowded,
+    just honestly, into whichever option is least bad. Returns None only
+    if there are no candidates left to check at all (e.g. every active
+    program is already watched) or every live orderbook fetch failed.
     """
     screened = screen_incentive_programs(rest_client, top_n=1000)
     candidates = [p for p in screened if p.market_ticker not in exclude_tickers]
+    if not candidates:
+        logger.warning("No replacement candidate available -- every active program is already watched")
+        return None
 
+    best: ScreenedProgram | None = None
+    best_score: float | None = None
     for program in candidates[:max_candidates_to_check]:
         try:
             raw = rest_client.get_orderbook(program.market_ticker)
@@ -151,16 +167,17 @@ def find_replacement(
             logger.warning("Failed to fetch orderbook for candidate %s", program.market_ticker, exc_info=True)
             continue
 
-        crowding = _crowding_ratio_from_raw_orderbook(raw, program.target_size)
-        if crowding is not None and crowding <= config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO:
-            logger.info(
-                "%s: selected as replacement candidate (crowding=%.2f, reward_density=%.4f)",
-                program.market_ticker, crowding, program.reward_density_score,
-            )
-            return program
+        program.crowding_ratio = _crowding_ratio_from_raw_orderbook(raw, program.target_size)
+        program.adjusted_score = _adjusted_score(program.reward_density_score, program.crowding_ratio, None)
+        if best_score is None or program.adjusted_score > best_score:
+            best, best_score = program, program.adjusted_score
 
-    logger.warning(
-        "No replacement candidate found under crowding threshold %.2f among top %d checked",
-        config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO, max_candidates_to_check,
+    if best is None:
+        logger.warning("Failed to fetch live data for any of the top %d candidates checked", max_candidates_to_check)
+        return None
+
+    logger.info(
+        "%s: selected as replacement candidate (crowding=%s, adjusted_score=%.4f, reward_density=%.4f)",
+        best.market_ticker, best.crowding_ratio, best_score, best.reward_density_score,
     )
-    return None
+    return best

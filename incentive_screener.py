@@ -231,6 +231,27 @@ def screen_incentive_programs(
     return pool[:top_n]
 
 
+def select_watchlist(client: KalshiRestClient, num_markets: int) -> list[ScreenedProgram]:
+    """
+    Fully autonomous market selection for main.py's initial watch list --
+    applies the crowding-aware ranking (see screen_incentive_programs) at
+    live pipeline startup, not just the manual "python3
+    incentive_screener.py" workflow.
+
+    Always returns the top num_markets candidates by adjusted_score
+    (crowding/volatility-dampened, never disqualified) -- CONFIRMED live
+    2026-09-02: every currently active incentive program was already
+    well-crowded (least-crowded observed was ~8.9x target_size), so an
+    earlier design that hard-excluded anything above an absolute crowding
+    threshold always returned []. Ranking-only dampening still means a
+    genuinely uncrowded market (if one ever appears) naturally rises to
+    the top; when nothing is uncrowded, this still picks the least-bad
+    N available rather than nothing at all.
+    """
+    pool_size = max(config.SCREENER_LIVE_CHECK_POOL_SIZE, num_markets)
+    return screen_incentive_programs(client, top_n=num_markets, crowding_aware=True, live_check_pool_size=pool_size)
+
+
 def print_report(screened: list[ScreenedProgram]) -> None:
     crowding_aware = any(s.adjusted_score is not None for s in screened)
     if crowding_aware:

@@ -16,7 +16,8 @@ from quoting_policy import compute_quote, maybe_execute_stop_loss
 from news_feed import score_relevance
 from market_switcher import MarketSwitcher, compute_crowding_ratio
 from event_calendar import hours_until_close
-from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility
+from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
+from main import _select_initial_watchlist
 import config
 
 
@@ -564,6 +565,104 @@ def test_market_switcher_trigger_requires_sustain_and_cooldown():
     print("test_market_switcher_trigger_requires_sustain_and_cooldown: PASS")
 
 
+class _FakeScreeningClient:
+    """Fake REST client for testing select_watchlist/screen_incentive_programs
+    end-to-end (get_all_incentive_programs + per-ticker get_orderbook/
+    get_trades) without any network access."""
+
+    def __init__(self, programs, orderbooks, trades=None):
+        self._programs = programs
+        self._orderbooks = orderbooks
+        self._trades = trades or {}
+
+    def get_all_incentive_programs(self, status="active", program_type="liquidity"):
+        return self._programs
+
+    def get_orderbook(self, ticker, depth=None):
+        return self._orderbooks.get(ticker, {"orderbook_fp": {"yes_dollars": [], "no_dollars": []}})
+
+    def get_trades(self, ticker, limit=100, **params):
+        return self._trades.get(ticker, {"trades": []})
+
+
+def _fake_program(ticker, period_reward_cents, target_size, discount_bps=9000):
+    now = datetime.now(timezone.utc)
+    return {
+        "market_ticker": ticker,
+        "start_date": (now - timedelta(days=1)).isoformat(),
+        "end_date": (now + timedelta(days=10)).isoformat(),
+        "period_reward": period_reward_cents,
+        "target_size_fp": target_size,
+        "discount_factor_bps": discount_bps,
+    }
+
+
+def _fake_orderbook(yes_size, no_size):
+    return {"orderbook_fp": {"yes_dollars": [["0.5000", f"{yes_size:.2f}"]], "no_dollars": [["0.4800", f"{no_size:.2f}"]]}}
+
+
+def test_select_watchlist_picks_best_available_even_when_all_crowded():
+    # CROWDED has by far the highest raw reward density but is very
+    # crowded; GOOD-A/B/C are all also crowded, just less so. Regression
+    # coverage for the 2026-09-02 fix: select_watchlist must NEVER return
+    # fewer than requested (or empty) just because nothing is genuinely
+    # uncrowded -- it should rank ALL candidates by adjusted_score and
+    # pick the least-bad N, since every currently active real market was
+    # observed to already be well-crowded (least-crowded ~8.9x
+    # target_size) and a hard cutoff would always find nothing.
+    programs = [
+        _fake_program("CROWDED", period_reward_cents=100000, target_size=100),
+        _fake_program("GOOD-A", period_reward_cents=50000, target_size=100),
+        _fake_program("GOOD-B", period_reward_cents=40000, target_size=100),
+        _fake_program("GOOD-C", period_reward_cents=30000, target_size=100),
+    ]
+    orderbooks = {
+        "CROWDED": _fake_orderbook(1000, 1000),  # crowding = 2000/200 = 10.0
+        "GOOD-A": _fake_orderbook(40, 40),       # 80/200 = 0.4
+        "GOOD-B": _fake_orderbook(30, 30),       # 0.3
+        "GOOD-C": _fake_orderbook(20, 20),       # 0.2
+    }
+    client = _FakeScreeningClient(programs, orderbooks)
+
+    selected = select_watchlist(client, num_markets=2)
+    tickers = [p.market_ticker for p in selected]
+    assert len(tickers) == 2, "must always return num_markets, never fewer, when enough programs exist"
+    # CROWDED's much higher raw reward density loses out here because its
+    # crowding dampens it below all three GOOD-* candidates -- but it was
+    # still RANKED, not excluded outright by a hard cutoff (see
+    # test_adjusted_score_dampens_for_crowding_and_volatility for the
+    # dampening-not-disqualifying behavior in isolation).
+    assert tickers == ["GOOD-A", "GOOD-B"], tickers
+    print("test_select_watchlist_picks_best_available_even_when_all_crowded: PASS")
+
+
+def test_select_watchlist_returns_fewer_than_requested_if_not_enough_programs_exist():
+    programs = [_fake_program("ONLY-ONE", period_reward_cents=50000, target_size=100)]
+    orderbooks = {"ONLY-ONE": _fake_orderbook(40, 40)}
+    client = _FakeScreeningClient(programs, orderbooks)
+
+    selected = select_watchlist(client, num_markets=3)
+    assert [p.market_ticker for p in selected] == ["ONLY-ONE"]
+    print("test_select_watchlist_returns_fewer_than_requested_if_not_enough_programs_exist: PASS")
+
+
+def test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist():
+    # Zero active programs at all -> _select_initial_watchlist must fall
+    # back to config.WATCHED_MARKET_TICKERS rather than starting with an
+    # empty watch list. (Crowding alone no longer triggers the fallback --
+    # see the two tests above.)
+    client = _FakeScreeningClient(programs=[], orderbooks={})
+
+    original_auto = config.AUTO_SELECT_WATCHLIST
+    try:
+        config.AUTO_SELECT_WATCHLIST = True
+        tickers, screened = _select_initial_watchlist(client)
+        assert tickers == config.WATCHED_MARKET_TICKERS, tickers
+    finally:
+        config.AUTO_SELECT_WATCHLIST = original_auto
+    print("test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist: PASS")
+
+
 def test_market_switcher_backs_off_after_failed_search_not_just_successful_switch():
     """
     Regression test for a live incident (2026-09-02): both watched
@@ -618,4 +717,7 @@ if __name__ == "__main__":
     test_estimate_crowding_and_volatility_from_fake_client()
     test_adjusted_score_dampens_for_crowding_and_volatility()
     test_market_switcher_backs_off_after_failed_search_not_just_successful_switch()
+    test_select_watchlist_picks_best_available_even_when_all_crowded()
+    test_select_watchlist_returns_fewer_than_requested_if_not_enough_programs_exist()
+    test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist()
     print("\nALL TESTS PASSED")

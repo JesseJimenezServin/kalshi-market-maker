@@ -72,7 +72,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 23/23 passing
+- test_logic.py -- offline unit tests, no network required, 27/27 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -378,14 +378,57 @@ on the switcher to find something better on its own (no candidate under
 SWITCH_CANDIDATE_MAX_CROWDING_RATIO=1.0 was found among the top 10
 reward-density candidates checked).
 
+- 2026-09-02 (completed): Fully autonomous watch-list selection.
+  incentive_screener.select_watchlist applies the crowding-aware ranking
+  live at pipeline startup (not just the manual screening workflow),
+  hard-filtering to candidates whose LIVE crowding ratio is at/below
+  config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO -- the SAME bar
+  market_switcher.find_replacement requires of a later replacement, so
+  day-0 selection and later mid-run switches are held to one consistent
+  standard (missing/unmeasured crowding is excluded here, unlike
+  screen_incentive_programs' general ranking, where it's neutral).
+  main.py's new _select_initial_watchlist wires this in via
+  config.AUTO_SELECT_WATCHLIST (default True, config.NUM_MARKETS_TO_WATCH
+  markets), falling back to the manual WATCHED_MARKET_TICKERS list if
+  auto-selection finds nothing eligible or is turned off. Runtime-only,
+  same as the market switcher -- a restart re-runs selection from
+  scratch, nothing is persisted back to config.py.
+  2026-09-02 REVISION (same day, before this was ever run for real):
+  the hard crowding cutoff described above was dropped entirely after
+  live-checking it against real data -- EVERY currently active incentive
+  program was already well-crowded (least-crowded observed ~8.9x
+  target_size, most far higher), so the cutoff always returned []/None
+  and neither autonomous selection nor market_switcher.find_replacement
+  could ever actually pick anything. Both now always return the
+  least-bad available candidate(s) ranked by adjusted_score (dampened,
+  never disqualified, by crowding/volatility) instead of hard-excluding
+  anything above an absolute threshold -- config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO
+  was removed as now-unused. select_watchlist only falls back to
+  WATCHED_MARKET_TICKERS if there are zero active incentive programs at
+  all, not merely because everything's crowded. 3 tests updated to match
+  (fewer-than-requested and zero-programs cases, not a crowding-cutoff
+  case); 27/27 passing.
+  incentive_refresh_loop's incentive_program_snapshots logging now checks
+  against the live `states` dict instead of the static
+  WATCHED_MARKET_TICKERS list -- a real gap that would otherwise have
+  silently stopped that table (and the dashboard's "Daily Pool ($)"
+  column, and analysis.py's EstSoFar) from updating for any
+  auto-selected or switched-into ticker. 3 new tests (crowding-filter +
+  count-cap, empty-result case, fallback-on-nothing-eligible); 27/27
+  passing. Re-verified via grep that no order-placing code exists
+  anywhere. Together with the 2026-09-02 market-switcher fix above, the
+  pipeline now both picks its own markets at startup and can switch away
+  mid-run without any manual intervention.
+
 ## Next steps (in order)
-1. Let the live run actually accumulate data -- the pipeline (risk
-   engine, reference-price quoting, market switcher now armed, news +
-   event-calendar signals) is built and tested but has very little real
-   runtime behind it yet.
+1. Let the live run actually accumulate data -- the pipeline now picks
+   its own watch list at startup and can switch away mid-run on its own
+   (risk engine, reference-price quoting, market switcher armed and
+   throttle-fixed, news + event-calendar signals, autonomous selection),
+   but has very little real runtime behind it yet.
 2. Deploy main.py to an always-on host (VPS, systemd service) -- not yet
-   started; right now data collection stops whenever this laptop is
-   off/asleep.
+   started; right now data collection (and the ability to actually pick
+   new markets/switch) stops whenever this laptop is off/asleep.
 3. Run continuously for 1-2 weeks minimum, spanning quiet periods and at
    least one volatility event.
 4. Analyze data/paper_trading.sqlite: compare avg snapshot score x period

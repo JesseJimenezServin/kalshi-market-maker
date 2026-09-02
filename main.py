@@ -41,7 +41,7 @@ from auth import KalshiSigner
 from rest_client import KalshiRestClient
 from orderbook import OrderbookManager, dollars_to_cents, fp_to_size
 from ws_client import KalshiWebSocketClient
-from incentive_screener import ScreenedProgram, screen_incentive_programs, print_report
+from incentive_screener import ScreenedProgram, screen_incentive_programs, select_watchlist, print_report
 from reward_simulator import score_both_sides
 from adverse_selection_sim import HypotheticalQuote, InventoryState, process_trade_for_inventory
 from logger import SimulationLogger
@@ -227,9 +227,18 @@ async def scoring_loop(
 
 async def incentive_refresh_loop(
     rest_client: KalshiRestClient,
+    states: dict[str, MarketRuntimeState],
     sim_logger: SimulationLogger,
     interval_sec: float,
 ) -> None:
+    """
+    `states` (not config.WATCHED_MARKET_TICKERS) is the source of truth
+    for which tickers to log program snapshots for -- with
+    config.AUTO_SELECT_WATCHLIST on, the actually-watched tickers can
+    differ from that static list entirely, and market_switch_loop can
+    swap `states`' keys mid-run. Reading states.keys() fresh each
+    iteration keeps this in sync with both.
+    """
     while True:
         try:
             # screen_incentive_programs makes blocking `requests` calls;
@@ -239,7 +248,7 @@ async def incentive_refresh_loop(
             logger.info("Incentive screen refreshed: %d active liquidity programs found", len(results))
             print_report(results)
             for program in results:
-                if program.market_ticker in config.WATCHED_MARKET_TICKERS:
+                if program.market_ticker in states:
                     sim_logger.log_incentive_program_snapshot(
                         ticker=program.market_ticker,
                         period_reward=program.period_reward,
@@ -407,18 +416,42 @@ def make_trade_handler(
     return on_trade
 
 
+def _select_initial_watchlist(rest_client: KalshiRestClient) -> tuple[list[str], list[ScreenedProgram]]:
+    """
+    Picks the watch list main.py starts with. If config.AUTO_SELECT_WATCHLIST
+    is True (the default), autonomously selects config.NUM_MARKETS_TO_WATCH
+    markets via incentive_screener.select_watchlist -- no manual curation
+    needed, and never disqualified by crowding alone (see that function's
+    docstring: real markets right now are all fairly crowded, so it picks
+    the least-bad N available rather than nothing). Falls back to the
+    manual config.WATCHED_MARKET_TICKERS list only if auto-selection is
+    disabled or there simply aren't config.NUM_MARKETS_TO_WATCH active
+    programs to choose from at all.
+
+    Returns (tickers, screened_programs) -- screened_programs is reused
+    directly by build_market_states below (no redundant re-screen).
+    """
+    if config.AUTO_SELECT_WATCHLIST:
+        selected = select_watchlist(rest_client, config.NUM_MARKETS_TO_WATCH)
+        if selected:
+            tickers = [p.market_ticker for p in selected]
+            logger.info("Auto-selected watch list (%d markets): %s", len(tickers), tickers)
+            return tickers, selected
+        logger.warning(
+            "Auto-selection found no active incentive programs at all -- falling back to "
+            "config.WATCHED_MARKET_TICKERS"
+        )
+
+    if not config.WATCHED_MARKET_TICKERS:
+        return [], []
+    return config.WATCHED_MARKET_TICKERS, screen_incentive_programs(rest_client)
+
+
 async def run() -> None:
     # Structural protection against ever again running two instances at
     # once (see singleton_lock.py for why this exists) -- checked first,
     # before any network calls, so a duplicate instance fails fast.
     acquire_singleton_lock("main", config.BASE_DIR)
-
-    if not config.WATCHED_MARKET_TICKERS:
-        logger.error(
-            "config.WATCHED_MARKET_TICKERS is empty. Run incentive_screener.py first, "
-            "pick some active liquidity-incentivized markets, and add their tickers to config.py."
-        )
-        return
 
     signer = None
     if config.KALSHI_API_KEY_ID and config.KALSHI_PRIVATE_KEY_PATH:
@@ -430,14 +463,26 @@ async def run() -> None:
     orderbook_manager = OrderbookManager()
     sim_logger = SimulationLogger()
 
-    # Seed per-market state with the REAL target_size / discount_factor from
-    # the live incentive screener. Watched tickers with no active program
-    # are logged and skipped -- we don't simulate scoring for them.
-    screened = screen_incentive_programs(rest_client)
-    states = build_market_states(config.WATCHED_MARKET_TICKERS, screened)
+    # _select_initial_watchlist makes blocking `requests` calls (possibly
+    # several, if auto-selecting); run it off the event loop.
+    watched_tickers, screened = await asyncio.to_thread(_select_initial_watchlist, rest_client)
+    if not watched_tickers:
+        logger.error(
+            "No markets to watch: auto-selection (if enabled) found nothing eligible, and "
+            "config.WATCHED_MARKET_TICKERS is empty. Run incentive_screener.py yourself, pick some "
+            "active liquidity-incentivized markets, and add their tickers to config.py, or check "
+            "connectivity/credentials."
+        )
+        return
+
+    # Seed per-market state with the REAL target_size / discount_factor
+    # already fetched above -- watched tickers with no active program
+    # (only possible via the manual fallback list) are logged and
+    # skipped, since there's no live program to simulate scoring against.
+    states = build_market_states(watched_tickers, screened)
 
     ws_client = KalshiWebSocketClient(
-        tickers=config.WATCHED_MARKET_TICKERS,
+        tickers=watched_tickers,
         orderbook_manager=orderbook_manager,
         signer=signer,
         on_trade=make_trade_handler(orderbook_manager, states, sim_logger),
@@ -448,7 +493,7 @@ async def run() -> None:
     await asyncio.gather(
         ws_client.run_forever(),
         scoring_loop(orderbook_manager, states, sim_logger),
-        incentive_refresh_loop(rest_client, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
+        incentive_refresh_loop(rest_client, states, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
         news_refresh_loop(rest_client, states, sim_logger, config.NEWS_POLL_INTERVAL_SEC),
         event_refresh_loop(rest_client, states, sim_logger, config.EVENT_CALENDAR_POLL_INTERVAL_SEC),
         market_switch_loop(rest_client, ws_client, orderbook_manager, states, sim_logger, config.MARKET_SWITCH_CHECK_INTERVAL_SEC),
