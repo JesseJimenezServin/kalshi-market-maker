@@ -54,9 +54,11 @@ sustained data-collection window.
   config.MARKET_SWITCHER_ENABLED (now True -- see 2026-09-02 entry
   below). Orchestration loop lives in main.py (market_switch_loop) to
   avoid a circular import with MarketRuntimeState.
-- news_feed.py -- zero-cost news-awareness signal: polls GDELT's free
-  Doc 2.0 API (no key required), rule-based keyword-overlap relevance
-  scoring (no LLM), feeds a decaying news_signal into RiskEngine
+- news_feed.py -- zero-cost news-awareness signal: polls Google News'
+  public RSS search (no key required, replaced GDELT 2026-09-02 --
+  see milestones below), rule-based keyword-overlap relevance scoring
+  gated on a distinctive (capitalized) keyword (no LLM), feeds a
+  decaying news_signal into RiskEngine
 - event_calendar.py -- scheduled-event calendar awareness: fetches each
   watched market's REAL close/resolution time (rest_client.get_market)
   and feeds hours_until_close into RiskEngine as a proximity flag (nudges
@@ -70,16 +72,20 @@ sustained data-collection window.
 - templates/dashboard.html -- single-page dashboard UI (markets table w/
   risk badge + qualifying-snapshot counts + net position, order book
   depth bars with the hypothetical quote overlaid, recent fills,
-  performance chart, flash highlight on new fills/stop-losses)
+  performance chart, flash highlight on new fills/stop-losses, capital
+  allocation bars, portfolio balance chart -- see 2026-09-02 below)
 - analysis.py -- read-only report: ESTIMATED dollar reward per ticker
   (snapshot_scores joined against incentive_program_snapshots) printed
   alongside real adverse-selection P&L from inventory_marks. No simulated
-  cash balance -- P&L is already tracked correctly in cents.
+  cash balance in THIS report specifically -- P&L is already tracked
+  correctly in cents (the dashboard's balance chart, added 2026-09-02,
+  is a separate, purely additive visualization of the same P&L data,
+  not a new ledger).
 - singleton_lock.py -- structural protection so only one instance of
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 33/33 passing
+- test_logic.py -- offline unit tests, no network required, 39/39 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -290,11 +296,12 @@ sustained data-collection window.
   assumes our observed average score is representative of the rest of the
   period, just time-scaled -- not adjusted for anything else (volatility
   regime changes, other LPs arriving/leaving, etc.).
-- News-awareness signal is zero-cost (GDELT + keyword heuristic, no LLM
-  classification, no paid APIs). Quality is a known limitation vs. a
-  true NLP/LLM classifier -- expect false positives/negatives; flagged as
-  a future upgrade path if paper-trading data suggests it's too noisy or
-  misses real signal.
+- News-awareness signal is zero-cost (Google News RSS + keyword
+  heuristic, no LLM classification, no paid APIs -- see the 2026-09-02
+  GDELT swap below). Quality is a known limitation vs. a true NLP/LLM
+  classifier -- expect false positives/negatives even after the
+  distinctive-keyword gate fix; flagged as a future upgrade path if
+  paper-trading data suggests it's still too noisy or misses real signal.
 - "My share" of reward score is computed against the REAL live book
   (our contribution alone in the numerator, everyone's total including
   ours in the denominator -- verified 2026-09-02, not the double-counting
@@ -462,6 +469,73 @@ reward-density candidates checked).
   position is ALLOWED to grow before quotes pull/flatten is now
   allocation-aware, not the resting order size itself; worth revisiting
   if a market's allocation ever ends up smaller than the quote size.
+- 2026-09-02 (completed): rest_client.get_trades was hitting a
+  nonexistent /markets/{ticker}/trades path (404 confirmed via curl on
+  every ticker checked) instead of the real /markets/trades?ticker=...
+  list endpoint -- caught by the capital-allocation work above, since
+  that's what first exercised it live. Pre-existing bug, predates this
+  session; main.py's own trade handling uses the WebSocket channel, not
+  this REST method, so nothing else was affected. Fixed.
+- 2026-09-02 (completed): Replaced GDELT with Google News RSS as the
+  news-awareness source. GDELT was found to be 100% unreachable from
+  this network -- CONFIRMED via curl (connect timeout, read timeout, and
+  SSL handshake timeout all observed across repeated attempts, while
+  Kalshi's own API and other HTTPS hosts worked fine from the same
+  machine, ruling out a general network issue) -- so the signal had
+  never actually worked, contrary to the earlier assumption that this
+  was just a sandbox-only restriction. Verified Google News RSS live,
+  including through Python's `requests` (not just curl), before
+  shipping. fetch_recent_articles keeps its exact same contract
+  (returns [{"headline", "source_url", "theme_tags"}]) so nothing
+  downstream needed to change. theme_tags is now always [] (Google News
+  RSS has no GKG-style tag concept) -- a non-regression, since
+  score_relevance already fell back to title-only matching in the
+  common case where GDELT's theme_tags was empty too.
+- 2026-09-02 (completed): Fixed a real precision bug this surfaced
+  immediately once the feed actually started working: with a short
+  derived-keyword list (e.g. 4 keywords for a short market title), a
+  SINGLE generic-word match (e.g. "sign", "orders") already cleared
+  NEWS_RELEVANCE_THRESHOLD=0.2 on completely unrelated articles
+  ("Patriots Sign TE...", "Justice department orders..."), flooding
+  news_events almost every poll (18 hits for one ticker in one cycle,
+  12 of 29 total logged rows confirmed false positives and deleted from
+  the live DB after the fix). Root cause: derive_keywords lowercased the
+  title BEFORE ranking by length, so for "Will Mamdani sign above 0
+  executive orders...", "executive" (9 chars, generic) outranked
+  "mamdani" (7 chars, the market's actual distinctive subject) --
+  length alone isn't a reliable distinctiveness signal. Fixed by ranking
+  CAPITALIZED words (a crude but effective proper-noun signal) first,
+  and added a new is_relevant() gate requiring the single most
+  distinctive keyword specifically be present, not just the aggregate
+  overlap ratio. 4 new regression tests using the real observed
+  keywords/headlines; 39/39 passing overall. Re-verified via grep that
+  no order-placing code exists anywhere.
+- 2026-09-02 (completed): Dashboard now shows a Portfolio Balance chart
+  (config.STARTING_CAPITAL_USD + cumulative simulated P&L over time) and
+  a Capital Allocation panel (per-market $ and % of the current
+  allocation, from capital_allocator.py). The balance series correctly
+  freezes a market's contribution at its last known value if
+  market_switcher.py rotates away from it, rather than dropping it --
+  reuses server.py's existing latest-per-ticker accumulation pattern, no
+  new "banked P&L" bookkeeping needed in main.py. Also fixed, while
+  building this: the existing performance chart's history was capped at
+  a flat "last 2000 rows" (server.py's old HISTORY_ROW_CAP), which
+  across 3 actively-ticking markets only covered roughly the last ~11
+  minutes -- not remotely enough for a 1-2 week run. Replaced with a
+  proper time-bounded (config.PERFORMANCE_HISTORY_LOOKBACK_HOURS,
+  default 14 days) + downsampled (config.PERFORMANCE_HISTORY_BUCKET_SECONDS,
+  default 5 min -- last sample per bucket, computed via SQL window
+  functions) query, so the chart stays meaningful across the whole run
+  instead of only the last few minutes. New inventory_marks.max_inventory
+  column (in-place migration) records each market's current
+  capital_allocator allocation on the SAME continuous per-tick timeline
+  already used for P&L -- no second table needed, and it self-corrects
+  when a market is switched away (simply stops getting new rows, same
+  as every other per-market dashboard field). Verified end-to-end
+  against real live payload data via a Node harness (no browser
+  available in this environment) executing the actual render functions,
+  not just a syntax check. Purely additive/visualization -- no
+  simulation logic touched, re-verified via grep.
 
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks

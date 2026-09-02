@@ -18,6 +18,13 @@ per second, built entirely from SQL queries against the SQLite file:
                           server.py and main.py are separate processes with
                           no shared memory)
 
+Also derives, from the tables above:
+  - a downsampled performance/balance history (reward score proxy, P&L,
+    and starting-balance-adjusted balance over time -- see
+    _performance_history)
+  - a capital-allocation percentage breakdown, from each market's latest
+    inventory_marks.max_inventory (see _capital_allocation)
+
 Run with:
     python3 server.py
 """
@@ -63,9 +70,6 @@ app = FastAPI(title="Kalshi Liquidity Lab Dashboard")
 SimulationLogger()
 
 RECENT_FILLS_LIMIT = 10
-# Bounds query cost as the DB grows over a long-running collection window;
-# the performance chart only needs recent history, not the full lifetime.
-HISTORY_ROW_CAP = 2000
 
 
 def _connect() -> sqlite3.Connection:
@@ -126,39 +130,95 @@ def _recent_event_tickers(conn: sqlite3.Connection, since_ts: float) -> set[str]
 
 def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     """
-    Two proxy series, computed in Python from the last HISTORY_ROW_CAP rows
-    of each table (chronological order):
+    Three proxy series, downsampled to at most one point per
+    config.PERFORMANCE_HISTORY_BUCKET_SECONDS within the last
+    config.PERFORMANCE_HISTORY_LOOKBACK_HOURS -- bounded this way
+    (rather than the previous flat "last N rows" cap) so the chart stays
+    meaningful across a multi-day/multi-week run instead of only ever
+    showing the last few minutes of a fast-ticking, multi-market log:
       - reward_score: running cumulative sum of combined_score across all
         watched markets. This is a unitless proxy for reward capture, NOT
         dollars -- Kalshi's actual USD payout formula pools every
         participant's snapshot scores over the full period, which this
         codebase doesn't (and can't, from public data alone) reconstruct.
       - pnl_dollars: running total simulated P&L (unrealized + realized)
-        across all watched markets, in dollars, using each market's most
-        recently observed mark at every point in time.
+        across every market ever watched, in dollars, using each
+        market's most recently observed mark at every point in time --
+        a market's contribution is FROZEN at its last known value once
+        it stops logging (e.g. switched away by market_switcher.py),
+        not dropped, so a switch never causes a phantom balance jump.
+      - balance_dollars: config.STARTING_CAPITAL_USD + pnl_dollars --
+        the pretend account balance over time (see capital_allocator.py).
     """
-    score_rows = list(reversed(conn.execute(
-        "SELECT ts, combined_score FROM snapshot_scores ORDER BY ts DESC LIMIT ?",
-        (HISTORY_ROW_CAP,),
-    ).fetchall()))
-    reward_series = []
-    cumulative = 0.0
-    for r in score_rows:
-        cumulative += r["combined_score"] or 0.0
-        reward_series.append({"ts": r["ts"], "value": cumulative})
+    cutoff_ts = time.time() - config.PERFORMANCE_HISTORY_LOOKBACK_HOURS * 3600
+    bucket = config.PERFORMANCE_HISTORY_BUCKET_SECONDS
 
-    pnl_rows = list(reversed(conn.execute(
-        "SELECT ts, ticker, unrealized_pnl_cents, realized_pnl_cents FROM inventory_marks ORDER BY ts DESC LIMIT ?",
-        (HISTORY_ROW_CAP,),
-    ).fetchall()))
+    score_rows = conn.execute(
+        """
+        SELECT ts, cumulative FROM (
+            SELECT ts,
+                   SUM(combined_score) OVER (ORDER BY ts) AS cumulative,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CAST(ts / ? AS INTEGER) ORDER BY ts DESC
+                   ) AS rn
+            FROM snapshot_scores
+            WHERE ts > ?
+        )
+        WHERE rn = 1
+        ORDER BY ts ASC
+        """,
+        (bucket, cutoff_ts),
+    ).fetchall()
+    reward_series = [{"ts": r["ts"], "value": r["cumulative"] or 0.0} for r in score_rows]
+
+    pnl_rows = conn.execute(
+        """
+        SELECT ts, ticker, unrealized_pnl_cents, realized_pnl_cents FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY ticker, CAST(ts / ? AS INTEGER) ORDER BY ts DESC
+            ) AS rn
+            FROM inventory_marks
+            WHERE ts > ?
+        )
+        WHERE rn = 1
+        ORDER BY ts ASC
+        """,
+        (bucket, cutoff_ts),
+    ).fetchall()
     last_pnl_by_ticker: dict[str, float] = {}
     pnl_series = []
+    balance_series = []
     for r in pnl_rows:
         total_cents = (r["unrealized_pnl_cents"] or 0.0) + (r["realized_pnl_cents"] or 0.0)
         last_pnl_by_ticker[r["ticker"]] = total_cents
-        pnl_series.append({"ts": r["ts"], "value": sum(last_pnl_by_ticker.values()) / 100.0})
+        pnl_dollars = sum(last_pnl_by_ticker.values()) / 100.0
+        pnl_series.append({"ts": r["ts"], "value": pnl_dollars})
+        balance_series.append({"ts": r["ts"], "value": config.STARTING_CAPITAL_USD + pnl_dollars})
 
-    return {"reward_score": reward_series, "pnl_dollars": pnl_series}
+    return {"reward_score": reward_series, "pnl_dollars": pnl_series, "balance_dollars": balance_series}
+
+
+def _capital_allocation(conn: sqlite3.Connection, inventory: dict[str, sqlite3.Row]) -> list[dict]:
+    """
+    "Where is the money currently allocated" breakdown, derived from each
+    currently-relevant ticker's latest inventory_marks.max_inventory (see
+    logger.py's SCHEMA) -- no separate table needed. A ticker that's been
+    switched away from ages out naturally once its max_inventory-bearing
+    rows fall out of `inventory` (server.py's normal latest-per-ticker
+    pattern), same as every other per-market dashboard field.
+    """
+    allocations = {
+        ticker: row["max_inventory"]
+        for ticker, row in inventory.items()
+        if row["max_inventory"] is not None
+    }
+    total = sum(allocations.values())
+    if total <= 0:
+        return []
+    return [
+        {"ticker": t, "dollars": dollars, "pct": 100.0 * dollars / total}
+        for t, dollars in sorted(allocations.items(), key=lambda kv: -kv[1])
+    ]
 
 
 def build_dashboard_payload(since_ts: float | None = None) -> dict:
@@ -179,7 +239,7 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         inventory = _latest_per_ticker(
             conn, "inventory_marks",
             "ticker, ts, net_yes_contracts, avg_entry_price, mid_price, "
-            "unrealized_pnl_cents, realized_pnl_cents",
+            "unrealized_pnl_cents, realized_pnl_cents, max_inventory",
         )
         programs = _latest_per_ticker(
             conn, "incentive_program_snapshots",
@@ -269,6 +329,8 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
             "markets": markets,
             "recent_fills": _recent_fills(conn),
             "performance_history": _performance_history(conn),
+            "starting_capital_usd": config.STARTING_CAPITAL_USD,
+            "capital_allocation": _capital_allocation(conn, inventory),
         }
     finally:
         conn.close()

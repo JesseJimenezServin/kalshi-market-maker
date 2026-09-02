@@ -41,7 +41,14 @@ CREATE TABLE IF NOT EXISTS inventory_marks (
     avg_entry_price REAL,
     mid_price REAL,
     unrealized_pnl_cents REAL,
-    realized_pnl_cents REAL
+    realized_pnl_cents REAL,
+    max_inventory INTEGER  -- this market's current capital_allocator.py
+                           -- allocation (see MarketRuntimeState.max_inventory);
+                           -- added so the dashboard can show "where is the
+                           -- money currently allocated" without a second
+                           -- table, self-correcting when a market is
+                           -- switched away since it simply stops getting
+                           -- new rows (see server.py's latest-per-ticker pattern)
 );
 
 CREATE TABLE IF NOT EXISTS orderbook_snapshots (
@@ -84,8 +91,8 @@ CREATE TABLE IF NOT EXISTS news_events (
     headline TEXT NOT NULL,
     source_url TEXT,
     relevance_score REAL NOT NULL,
-    theme_tags TEXT  -- JSON list of tags; may be an empty list, GDELT's
-                     -- ArtList mode doesn't reliably provide these
+    theme_tags TEXT  -- JSON list of tags; always [] currently -- Google
+                     -- News RSS has no GKG-style tag concept (see news_feed.py)
 );
 
 CREATE TABLE IF NOT EXISTS quote_snapshots (
@@ -159,6 +166,10 @@ class SimulationLogger:
         if "total_period_days" not in existing_cols:
             conn.execute("ALTER TABLE incentive_program_snapshots ADD COLUMN total_period_days REAL")
 
+        inventory_cols = {row[1] for row in conn.execute("PRAGMA table_info(inventory_marks)")}
+        if "max_inventory" not in inventory_cols:
+            conn.execute("ALTER TABLE inventory_marks ADD COLUMN max_inventory INTEGER")
+
     def log_snapshot_score(
         self,
         ticker: str,
@@ -204,16 +215,17 @@ class SimulationLogger:
         mid_price: float,
         unrealized_pnl_cents: float,
         realized_pnl_cents: float,
+        max_inventory: int | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO inventory_marks
                    (ts, ticker, net_yes_contracts, avg_entry_price, mid_price,
-                    unrealized_pnl_cents, realized_pnl_cents)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    unrealized_pnl_cents, realized_pnl_cents, max_inventory)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, net_yes_contracts, avg_entry_price, mid_price,
-                 unrealized_pnl_cents, realized_pnl_cents),
+                 unrealized_pnl_cents, realized_pnl_cents, max_inventory),
             )
 
     def log_orderbook_snapshot(

@@ -13,7 +13,7 @@ from incentive_screener import ScreenedProgram
 from main import build_market_states, compute_my_share_at_touched_price
 from risk_engine import RiskEngine, LOW, ELEVATED, HIGH
 from quoting_policy import compute_quote, maybe_execute_stop_loss
-from news_feed import score_relevance
+from news_feed import score_relevance, is_relevant, derive_keywords, _parse_articles, _build_news_query
 from market_switcher import MarketSwitcher, compute_crowding_ratio
 from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
@@ -371,7 +371,7 @@ def test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise():
 def test_score_relevance_keyword_overlap():
     keywords = ["hurricane", "florida", "landfall", "category"]
 
-    # Synthetic GDELT-ArtList-shaped article: title overlaps 3/4 keywords.
+    # Synthetic normalized article (see news_feed._parse_articles): title overlaps 3/4 keywords.
     relevant_article = {
         "headline": "Hurricane makes landfall in Florida overnight",
         "source_url": "https://example.com/a",
@@ -751,6 +751,81 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_derive_keywords_ranks_capitalized_proper_nouns_first():
+    # Real title observed live 2026-09-02 (KXMAMDANIEO-26SEP05-T0). The
+    # old length-only ranking put "executive" (9 chars, generic) ahead
+    # of "mamdani" (7 chars, the market's actual distinctive subject) --
+    # capitalization is the fix, not length.
+    keywords = derive_keywords("Will Mamdani sign above 0 executive orders between Aug 30, 2026 and Sep 5, 2026?", "")
+    assert keywords[0] == "mamdani", keywords
+    assert set(keywords) == {"mamdani", "executive", "orders", "sign"}, keywords
+    print("test_derive_keywords_ranks_capitalized_proper_nouns_first: PASS")
+
+
+def test_is_relevant_requires_distinctive_keyword_not_just_ratio():
+    # Same real keyword list (mamdani first after the fix above).
+    keywords = ["mamdani", "executive", "orders", "sign"]
+
+    true_positive = {"headline": "Mamdani imposes one-year ban on AI for most NYC students", "theme_tags": []}
+    assert is_relevant(keywords, true_positive, threshold=0.2) is True
+
+    # Regression coverage for the live flood (2026-09-02): these each
+    # clear the ratio threshold (1/4 = 0.25 >= 0.2) on a generic-word
+    # hit alone, with zero connection to the actual market -- must be
+    # rejected now that the distinctive-keyword gate is required.
+    false_positive_1 = {"headline": "New Orleans Saints sign Kevin Austin Jr. to practice squad", "theme_tags": []}
+    false_positive_2 = {"headline": "Justice department orders US states to expand reporting", "theme_tags": []}
+    assert is_relevant(keywords, false_positive_1, threshold=0.2) is False
+    assert is_relevant(keywords, false_positive_2, threshold=0.2) is False
+
+    assert is_relevant([], true_positive, threshold=0.2) is False
+    print("test_is_relevant_requires_distinctive_keyword_not_just_ratio: PASS")
+
+
+def test_build_news_query_ors_keywords():
+    assert _build_news_query(["hurricane", "florida", "landfall"]) == "hurricane OR florida OR landfall"
+    print("test_build_news_query_ors_keywords: PASS")
+
+
+def test_parse_articles_filters_by_lookback_keeps_undated():
+    # Regression coverage for the 2026-09-02 GDELT -> Google News RSS
+    # swap: real <item> elements, a stale one that must be filtered by
+    # pubDate, and one with no pubDate at all (kept, not dropped -- a
+    # missing date is a parsing edge case, not evidence of staleness).
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(hours=1)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    stale = (now - timedelta(hours=100)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    xml = f"""<?xml version="1.0"?>
+<rss><channel>
+<item><title>Recent article</title><link>https://example.com/a</link><pubDate>{recent}</pubDate></item>
+<item><title>Stale article</title><link>https://example.com/b</link><pubDate>{stale}</pubDate></item>
+<item><title>No date article</title><link>https://example.com/c</link></item>
+</channel></rss>"""
+    parsed = _parse_articles(xml, lookback_hours=6, max_records=20)
+    headlines = {a["headline"] for a in parsed}
+    assert headlines == {"Recent article", "No date article"}, headlines
+    assert all(a["theme_tags"] == [] for a in parsed)
+    print("test_parse_articles_filters_by_lookback_keeps_undated: PASS")
+
+
+def test_parse_articles_respects_max_records():
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(hours=1)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    items = "".join(
+        f"<item><title>A{i}</title><link>https://example.com/{i}</link><pubDate>{recent}</pubDate></item>"
+        for i in range(5)
+    )
+    xml = f"<rss><channel>{items}</channel></rss>"
+    parsed = _parse_articles(xml, lookback_hours=6, max_records=3)
+    assert len(parsed) == 3, parsed
+    print("test_parse_articles_respects_max_records: PASS")
+
+
+def test_parse_articles_handles_malformed_xml_gracefully():
+    assert _parse_articles("not xml at all <<<", lookback_hours=6, max_records=20) == []
+    print("test_parse_articles_handles_malformed_xml_gracefully: PASS")
+
+
 def test_market_switcher_backs_off_after_failed_search_not_just_successful_switch():
     """
     Regression test for a live incident (2026-09-02): both watched
@@ -814,4 +889,10 @@ if __name__ == "__main__":
     test_allocate_capital_min_floor_holds_even_when_max_cap_binds_elsewhere()
     test_allocate_capital_empty_returns_empty_dict()
     test_market_runtime_state_defaults_max_inventory_and_accepts_override()
+    test_build_news_query_ors_keywords()
+    test_parse_articles_filters_by_lookback_keeps_undated()
+    test_parse_articles_respects_max_records()
+    test_parse_articles_handles_malformed_xml_gracefully()
+    test_derive_keywords_ranks_capitalized_proper_nouns_first()
+    test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     print("\nALL TESTS PASSED")

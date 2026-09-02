@@ -123,6 +123,14 @@
   .depth-bar.yes { background: var(--green); }
   .depth-bar.no { background: var(--red); }
 
+  .alloc-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .alloc-ticker { width: 150px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; }
+  .alloc-bar-track { flex: 1; height: 16px; background: #1a2129; border-radius: 2px; overflow: hidden; }
+  .alloc-bar { height: 100%; background: var(--accent); }
+  .alloc-pct { width: 46px; flex-shrink: 0; text-align: right; }
+  .alloc-dollars { width: 64px; flex-shrink: 0; text-align: right; color: var(--muted); }
+  .balance-readout { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+
   .depth-row.our-quote {
     border: 1px dashed var(--quote);
     border-radius: 3px;
@@ -220,6 +228,26 @@
     </table>
   </section>
 
+  <section class="panel">
+    <h2>Capital Allocation</h2>
+    <div id="allocation-container"><div class="empty-state">No allocation data yet.</div></div>
+    <div class="muted" style="margin-top:8px; font-size:11px;">
+      Starting balance split across currently-watched markets, weighted by profit/risk (see
+      capital_allocator.py) -- governs each market's max hypothetical position size, not quote size.
+    </div>
+  </section>
+
+  <section class="panel span-2">
+    <h2>Portfolio Balance ($)</h2>
+    <div id="balance-readout" class="balance-readout muted">--</div>
+    <canvas id="balance-chart" height="70"></canvas>
+    <div class="muted" style="margin-top:6px; font-size:11px;">
+      Starting balance + simulated P&amp;L (realized + unrealized) across every market ever watched.
+      A market's contribution freezes at its last known value if the market switcher rotates away from
+      it -- switching never causes a phantom jump in balance.
+    </div>
+  </section>
+
   <section class="panel span-2">
     <h2>Reward Score (proxy) vs Simulated P&amp;L ($)</h2>
     <canvas id="performance-chart" height="90"></canvas>
@@ -240,6 +268,7 @@
 let lastPayload = null;
 let selectedTicker = null;
 let chart = null;
+let balanceChart = null;
 // ticker -> epoch ms until which its row should show the flash highlight.
 // Tracked client-side (not just the payload's transient flash flag) so
 // the highlight stays visible for a few render ticks instead of blinking
@@ -381,6 +410,74 @@ function renderDepth(markets) {
   container.innerHTML = renderCol("YES bids", yesRows, "yes") + renderCol("NO bids", noRows, "no");
 }
 
+function renderAllocation(allocation) {
+  const container = document.getElementById("allocation-container");
+  if (!allocation || allocation.length === 0) {
+    container.innerHTML = '<div class="empty-state">No allocation data yet.</div>';
+    return;
+  }
+  container.innerHTML = allocation.map(a => `
+    <div class="alloc-row">
+      <span class="alloc-ticker" title="${a.ticker}">${a.ticker}</span>
+      <div class="alloc-bar-track"><div class="alloc-bar" style="width:${a.pct}%"></div></div>
+      <span class="alloc-pct">${fmt(a.pct, 1)}%</span>
+      <span class="alloc-dollars">$${fmt(a.dollars, 0)}</span>
+    </div>
+  `).join("");
+}
+
+function renderBalanceReadout(startingCapital, balanceSeries) {
+  const readout = document.getElementById("balance-readout");
+  const current = balanceSeries && balanceSeries.length > 0
+    ? balanceSeries[balanceSeries.length - 1].value
+    : startingCapital;
+  if (current === null || current === undefined) {
+    readout.textContent = "--";
+    readout.className = "balance-readout muted";
+    return;
+  }
+  const delta = startingCapital !== null && startingCapital !== undefined ? current - startingCapital : null;
+  const deltaStr = delta !== null ? ` (${delta >= 0 ? "+" : ""}$${fmt(delta, 2)})` : "";
+  readout.textContent = `$${fmt(current, 2)}${deltaStr}`;
+  readout.className = "balance-readout " + (delta === null ? "" : pnlClass(delta));
+}
+
+function initBalanceChart() {
+  const ctx = document.getElementById("balance-chart").getContext("2d");
+  balanceChart = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [
+      {
+        label: "Balance ($)",
+        data: [],
+        borderColor: "#3fb950",
+        backgroundColor: "rgba(63, 185, 80, 0.08)",
+        fill: true,
+        pointRadius: 0,
+        tension: 0.15,
+      },
+    ]},
+    options: {
+      animation: false,
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: "#7d8894", maxTicksLimit: 10 }, grid: { color: "#1a2129" } },
+        y: { ticks: { color: "#3fb950" }, grid: { color: "#1a2129" }, title: { display: true, text: "Balance ($)", color: "#3fb950" } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function renderBalanceChart(balanceSeries) {
+  if (!balanceChart) return;
+  const series = balanceSeries || [];
+  balanceChart.data.labels = series.map((_, i) => i);
+  balanceChart.data.datasets[0].data = series.map(p => p.value);
+  balanceChart.update();
+}
+
 function initChart() {
   const ctx = document.getElementById("performance-chart").getContext("2d");
   chart = new Chart(ctx, {
@@ -460,6 +557,9 @@ function connect() {
     renderDepth(payload.markets);
     renderFillsTable(payload.recent_fills);
     renderChart(payload.performance_history);
+    renderAllocation(payload.capital_allocation);
+    renderBalanceReadout(payload.starting_capital_usd, payload.performance_history.balance_dollars);
+    renderBalanceChart(payload.performance_history.balance_dollars);
   };
 }
 
@@ -469,6 +569,7 @@ document.getElementById("depth-ticker-select").addEventListener("change", (e) =>
 });
 
 initChart();
+initBalanceChart();
 connect();
 </script>
 

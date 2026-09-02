@@ -235,6 +235,7 @@ async def scoring_loop(
                 mid_price=mid,
                 unrealized_pnl_cents=unrealized,
                 realized_pnl_cents=state.inventory.realized_pnl_cents,
+                max_inventory=state.max_inventory,
             )
 
         await asyncio.sleep(interval_sec)

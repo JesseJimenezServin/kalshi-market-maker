@@ -184,24 +184,31 @@ MAX_INVENTORY_SKEW_TICKS = 5
 # --------------------------------------------------------------------------
 # News-awareness signal (zero-cost, purely advisory)
 # --------------------------------------------------------------------------
-# GDELT's free Doc 2.0 API (no key required) is polled for recent articles
-# whose title/theme tags overlap with keywords derived from each watched
+# Google News' public RSS search (no key required) is polled for recent
+# articles whose title overlaps with keywords derived from each watched
 # market's title/subtitle. This is a coarse rule-based heuristic, NOT an
 # NLP/LLM classifier -- see news_feed.py for the scoring logic and its
 # documented limitations. Set NEWS_FEED_ENABLED = False to disable this
 # signal entirely (e.g. to A/B test against the volatility-only baseline).
+#
+# NOTE (2026-09-02): originally pointed at GDELT's Doc 2.0 API, which
+# turned out to be completely unreachable from this network (confirmed
+# via curl -- connect/read/SSL timeouts, while Kalshi's API and other
+# HTTPS hosts worked fine) -- the signal had never actually worked.
+# Replaced with Google News RSS, verified reachable end-to-end.
 NEWS_FEED_ENABLED = True
 
-GDELT_DOC_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+NEWS_RSS_API_URL = "https://news.google.com/rss/search"
 
-# How often to poll GDELT for each watched market. In seconds.
+# How often to poll Google News RSS for each watched market. In seconds.
 NEWS_POLL_INTERVAL_SEC = 300  # 5 minutes
 
-# How far back (hours) each GDELT query looks for articles.
+# How far back (hours) each query looks for articles (filtered client-side
+# by each article's pubDate -- see news_feed.py's _parse_articles).
 NEWS_LOOKBACK_HOURS = 6
 
 # Max number of keywords derived from a market's title/subtitle, used to
-# build the GDELT query and to compute keyword-overlap relevance.
+# build the news query and to compute keyword-overlap relevance.
 NEWS_MAX_KEYWORDS = 8
 
 # Fraction of a market's derived keywords that must appear in an article's
@@ -280,6 +287,19 @@ SCREENER_LIVE_CHECK_POOL_SIZE = 15
 # volatility (stdev of trade prices, in cents) during crowding-aware
 # screening.
 SCREENER_VOLATILITY_LOOKBACK_TRADES = 50
+
+# --------------------------------------------------------------------------
+# Dashboard performance history (server.py)
+# --------------------------------------------------------------------------
+# How far back the performance/balance chart looks, and at what
+# resolution -- downsampled (last sample per bucket, not a raw row cap),
+# so the chart stays meaningful across a multi-day/multi-week run
+# instead of only covering the last few minutes (see server.py's
+# _performance_history). 336h * 3600 / 300 = at most ~4032 chart points
+# regardless of how long main.py has been running or how many markets
+# it has watched over that time.
+PERFORMANCE_HISTORY_LOOKBACK_HOURS = 336  # 14 days
+PERFORMANCE_HISTORY_BUCKET_SECONDS = 300  # 5 minutes
 
 # --------------------------------------------------------------------------
 # Storage
