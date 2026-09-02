@@ -15,6 +15,8 @@ from risk_engine import RiskEngine, LOW, ELEVATED, HIGH
 from quoting_policy import compute_quote, maybe_execute_stop_loss
 from news_feed import score_relevance
 from market_switcher import MarketSwitcher, compute_crowding_ratio
+from event_calendar import hours_until_close
+from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility
 import config
 
 
@@ -432,6 +434,108 @@ def test_compute_crowding_ratio():
     print("test_compute_crowding_ratio: PASS")
 
 
+def test_hours_until_close():
+    now = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+
+    future = now + timedelta(hours=5)
+    assert abs(hours_until_close(future, now=now) - 5.0) < 1e-9
+
+    # A market already past its close_time -> negative hours (near-settled,
+    # NOT flagged as risky -- see RiskEngine.set_event_proximity).
+    past = now - timedelta(hours=3)
+    assert abs(hours_until_close(past, now=now) - (-3.0)) < 1e-9
+    print("test_hours_until_close: PASS")
+
+
+def test_risk_engine_event_proximity_escalates_within_window():
+    engine = RiskEngine(ticker="TEST")
+    inventory = InventoryState(ticker="TEST")
+
+    # Well outside the warning window -> stays LOW.
+    engine.set_event_proximity(config.EVENT_CALENDAR_WARNING_HOURS + 10)
+    engine.update(50.0, inventory, max_inventory=500)
+    assert engine.event_signal is False
+    assert engine.risk_level == LOW, engine.risk_level
+
+    # Within the warning window -> nudges to ELEVATED even though
+    # volatility/inventory alone would still say LOW.
+    engine.set_event_proximity(config.EVENT_CALENDAR_WARNING_HOURS - 1)
+    engine.update(50.0, inventory, max_inventory=500)
+    assert engine.event_signal is True
+    assert engine.risk_level == ELEVATED, engine.risk_level
+
+    # Already past close (negative hours) -> settled/near-settled, NOT flagged.
+    engine.set_event_proximity(-1.0)
+    engine.update(50.0, inventory, max_inventory=500)
+    assert engine.event_signal is False
+    assert engine.risk_level == LOW, engine.risk_level
+
+    # None (couldn't fetch close_time this poll) -> not flagged either.
+    engine.set_event_proximity(None)
+    engine.update(50.0, inventory, max_inventory=500)
+    assert engine.event_signal is False
+    print("test_risk_engine_event_proximity_escalates_within_window: PASS")
+
+
+class _FakeRestClient:
+    """Minimal stand-in for KalshiRestClient's get_orderbook/get_trades,
+    used to test incentive_screener's crowding/volatility estimators
+    without any network access."""
+
+    def __init__(self, orderbook=None, trades=None):
+        self._orderbook = orderbook
+        self._trades = trades
+
+    def get_orderbook(self, ticker, depth=None):
+        return self._orderbook
+
+    def get_trades(self, ticker, limit=100, **params):
+        return self._trades
+
+
+def test_estimate_crowding_and_volatility_from_fake_client():
+    fake_orderbook = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.5000", "150.00"]],
+            "no_dollars": [["0.4800", "150.00"]],
+        }
+    }
+    client = _FakeRestClient(orderbook=fake_orderbook)
+    # (150 + 150) / (2 * target_size), target_size=100 -> 300/200 = 1.5
+    ratio = _estimate_crowding(client, "TEST", target_size=100)
+    assert abs(ratio - 1.5) < 1e-9, ratio
+    assert _estimate_crowding(client, "TEST", target_size=0) is None
+
+    fake_trades = {"trades": [
+        {"yes_price_dollars": "0.5000"},
+        {"yes_price_dollars": "0.5200"},
+        {"yes_price_dollars": "0.4800"},
+    ]}
+    client2 = _FakeRestClient(trades=fake_trades)
+    vol = _estimate_recent_volatility(client2, "TEST", lookback_trades=50)
+    assert vol is not None and vol > 0, vol
+
+    # Fewer than 2 usable prices -> None, not a crash.
+    client3 = _FakeRestClient(trades={"trades": [{"yes_price_dollars": "0.5000"}]})
+    assert _estimate_recent_volatility(client3, "TEST", lookback_trades=50) is None
+    print("test_estimate_crowding_and_volatility_from_fake_client: PASS")
+
+
+def test_adjusted_score_dampens_for_crowding_and_volatility():
+    base = _adjusted_score(1.0, crowding_ratio=None, volatility_cents=None)
+    assert base == 1.0
+
+    crowded = _adjusted_score(1.0, crowding_ratio=3.0, volatility_cents=None)
+    assert crowded < base
+
+    volatile = _adjusted_score(1.0, crowding_ratio=None, volatility_cents=5.0)
+    assert volatile < base
+
+    both = _adjusted_score(1.0, crowding_ratio=3.0, volatility_cents=5.0)
+    assert both < crowded and both < volatile
+    print("test_adjusted_score_dampens_for_crowding_and_volatility: PASS")
+
+
 def test_market_switcher_trigger_requires_sustain_and_cooldown():
     switcher = MarketSwitcher()
     t0 = 1_000_000.0
@@ -480,4 +584,8 @@ if __name__ == "__main__":
     test_risk_engine_news_signal_escalates_then_decays()
     test_compute_crowding_ratio()
     test_market_switcher_trigger_requires_sustain_and_cooldown()
+    test_hours_until_close()
+    test_risk_engine_event_proximity_escalates_within_window()
+    test_estimate_crowding_and_volatility_from_fake_client()
+    test_adjusted_score_dampens_for_crowding_and_volatility()
     print("\nALL TESTS PASSED")

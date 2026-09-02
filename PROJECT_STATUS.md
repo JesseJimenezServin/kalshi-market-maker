@@ -44,12 +44,18 @@ sustained data-collection window.
 - market_switcher.py -- event-triggered market switcher: pure building
   blocks (crowding ratio, sustain+cooldown trigger logic, candidate
   search) -- NOT a continuous re-optimizer, opt-in via
-  config.MARKET_SWITCHER_ENABLED (default False). Orchestration loop
-  lives in main.py (market_switch_loop) to avoid a circular import with
-  MarketRuntimeState.
+  config.MARKET_SWITCHER_ENABLED (now True -- see 2026-09-02 entry
+  below). Orchestration loop lives in main.py (market_switch_loop) to
+  avoid a circular import with MarketRuntimeState.
 - news_feed.py -- zero-cost news-awareness signal: polls GDELT's free
   Doc 2.0 API (no key required), rule-based keyword-overlap relevance
   scoring (no LLM), feeds a decaying news_signal into RiskEngine
+- event_calendar.py -- scheduled-event calendar awareness: fetches each
+  watched market's REAL close/resolution time (rest_client.get_market)
+  and feeds hours_until_close into RiskEngine as a proximity flag (nudges
+  toward ELEVATED within config.EVENT_CALENDAR_WARNING_HOURS). Unlike
+  news_signal, needs no decay window -- self-correcting from close_time
+  each poll. Opt-in via config.EVENT_CALENDAR_ENABLED (default True).
 - main.py -- orchestrates all of the above; NO live orders are ever
   placed anywhere in this codebase (verified via grep, 2026-08-31)
 - server.py -- read-only FastAPI dashboard; streams data/paper_trading.sqlite
@@ -66,7 +72,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 14/14 passing
+- test_logic.py -- offline unit tests, no network required, 23/23 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -219,6 +225,51 @@ sustained data-collection window.
   NOT YET EXERCISED against a real trigger in production (still disabled
   by default) -- the sustain/cooldown logic is unit-tested with synthetic
   timestamps, not observed live.
+- 2026-09-02 (completed): config.MARKET_SWITCHER_ENABLED flipped to True
+  on the live run -- the switcher is now armed against real triggers for
+  the first time (previously unit-tested only, per the entry above).
+- 2026-09-02 (completed): Scheduled-event calendar awareness
+  (event_calendar.py). Fetches each watched market's REAL close/
+  resolution time via rest_client.get_market, computes hours_until_close,
+  and feeds it to that ticker's RiskEngine (new set_event_proximity
+  method) as a proximity flag -- nudges risk toward ELEVATED within
+  config.EVENT_CALENDAR_WARNING_HOURS (default 48h), same one-notch-only
+  severity as the existing news_signal. Deliberately does NOT flag a
+  market already past its close_time (negative hours) -- that's settled/
+  near-settled, which is safe, not risky, matching the existing KXEOWEEK
+  thesis. Unlike news_signal's point-in-time decay window, this needs no
+  artificial decay: hours_until_close is already a live, self-correcting
+  quantity recomputed from Kalshi's own close_time every poll
+  (config.EVENT_CALENDAR_POLL_INTERVAL_SEC, default hourly -- close_time
+  essentially never changes once listed). New event_calendar_snapshots
+  SQLite table for dashboard/audit visibility (pure instrumentation, same
+  pattern as quote_snapshots). Wired into main.py's asyncio.gather as
+  event_refresh_loop. CONFIRMED live 2026-09-02 on the first production
+  restart after deploy: close_time's field name/ISO8601 format matched a
+  real get_market() response (KXNFLSTADIUM -> 2028-09-01T03:59:00+00:00,
+  KXCITYCHAMPS -> 2030-07-01T03:59:00+00:00; both correctly unflagged,
+  far outside the 48h warning window).
+- 2026-09-02 (completed): Crowding-aware market selection
+  (incentive_screener.py). screen_incentive_programs gained an opt-in
+  crowding_aware parameter (default False -- existing callers, i.e.
+  main.py's incentive_refresh_loop, build_market_states at startup, and
+  market_switcher.find_replacement, are completely unaffected and issue
+  no extra REST calls): when True, the top
+  config.SCREENER_LIVE_CHECK_POOL_SIZE (default 15) reward-density-ranked
+  candidates each get one live get_orderbook call (real crowding ratio)
+  and one live get_trades call (stdev of recent trade prices in cents, a
+  coarse one-shot volatility proxy), combined into a new adjusted_score
+  that dampens -- never disqualifies -- reward density for real crowding
+  and choppiness. Missing/failed data is treated as neutral, not
+  penalizing. Enabled explicitly in incentive_screener.py's __main__
+  block (the manual "python3 incentive_screener.py" market-picking
+  workflow -- README Step 1), NOT the always-running pipeline, so the
+  live run's REST call volume/cadence is unchanged. print_report gained
+  Crowd/VolC/Adj columns when crowding-aware results are passed in. 4 new
+  tests (hours_until_close, RiskEngine event-proximity escalation,
+  crowding/volatility estimators against a fake REST client,
+  adjusted-score dampening); 23/23 passing. Re-verified via grep that no
+  order-placing code exists anywhere.
 
 ## Known simplifications / open items
 - analysis.py's `EstSoFar`/`IfFullPeriod` dollar rewards are OPTIMISTIC
@@ -252,12 +303,15 @@ sustained data-collection window.
   "Recent Simulated Fills" table itself -- that panel only reads
   simulated_fills. P&L chart is unaffected since it reads inventory_marks,
   which reflects stop-loss impact automatically.
-- Two planned workstreams, not yet started: scheduled-event calendar
-  awareness (feeding known event/resolution timing into the quoting
-  policy or market screener as a risk flag) and crowding-aware market
-  selection (accounting for how crowded a price level already is /
-  observed volatility when ranking markets in incentive_screener.py,
-  beyond today's simple reward-density heuristic).
+- Both previously-planned workstreams (scheduled-event calendar
+  awareness, crowding-aware market selection) are now built -- see the
+  2026-09-02 milestone entries above. The crowding-aware volatility
+  estimator's "trades" response-wrapper key (incentive_screener.py's
+  _estimate_recent_volatility) hasn't itself been exercised live, though
+  the per-trade field names it reads already have been (see that
+  function's docstring) -- worth a quick manual check the first time
+  `python3 incentive_screener.py` is run on a machine that can reach
+  Kalshi.
 - Dashboard's "Cumulative Reward Score" chart series is a unitless proxy
   (running sum of combined_score), not a dollar figure -- Kalshi's real
   USD payout pools every participant's score over the full period, which
@@ -296,14 +350,17 @@ sustained data-collection window.
   related.
 
 ## Next steps (in order)
-1. Pick 2-4 active, low-volatility incentivized markets via
-   incentive_screener.py, add tickers to config.py WATCHED_MARKET_TICKERS
-2. Deploy main.py to an always-on host (VPS, systemd service) --
-   not yet started
+1. Let the live run actually accumulate data -- the pipeline (risk
+   engine, reference-price quoting, market switcher now armed, news +
+   event-calendar signals) is built and tested but has very little real
+   runtime behind it yet.
+2. Deploy main.py to an always-on host (VPS, systemd service) -- not yet
+   started; right now data collection stops whenever this laptop is
+   off/asleep.
 3. Run continuously for 1-2 weeks minimum, spanning quiet periods and at
-   least one volatility event
+   least one volatility event.
 4. Analyze data/paper_trading.sqlite: compare avg snapshot score x period
-   reward against worst-case adverse-selection swings per market
+   reward against worst-case adverse-selection swings per market.
 5. Decision gate: only markets where reward plausibly exceeds worst-case
    risk proceed to Phase 1 (small live pilot, real orders, new code not
-   yet built)
+   yet built).

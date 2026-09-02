@@ -175,7 +175,7 @@ NEWS_SIGNAL_DECAY_MINUTES = 45
 # CURRENT market gives a sustained, clear signal to leave. Runtime-only --
 # does not rewrite WATCHED_MARKET_TICKERS above; a restart reverts to
 # whatever's configured there. See market_switcher.py.
-MARKET_SWITCHER_ENABLED = False
+MARKET_SWITCHER_ENABLED = True
 
 # Real resting depth (both sides, real book only) relative to
 # target_size, above which a CURRENTLY watched market is considered
@@ -201,6 +201,44 @@ MARKET_SWITCH_COOLDOWN_SEC = 1800  # 30 minutes
 # to be as tight as the ~1s scoring cadence, since triggers require
 # multi-minute sustained conditions anyway.
 MARKET_SWITCH_CHECK_INTERVAL_SEC = 30
+
+# --------------------------------------------------------------------------
+# Scheduled-event calendar awareness (feeds each watched market's REAL
+# close/resolution time into the risk engine as a proximity flag -- see
+# event_calendar.py). Independent of the news-awareness signal above:
+# this is deterministic (Kalshi's own close_time), not a keyword heuristic.
+# --------------------------------------------------------------------------
+EVENT_CALENDAR_ENABLED = True
+
+# close_time barely changes once a market is listed -- no need to poll
+# anywhere near scoring_loop's ~1s cadence.
+EVENT_CALENDAR_POLL_INTERVAL_SEC = 3600  # 1 hour
+
+# A watched market within this many hours of its real close/resolution
+# time gets nudged toward ELEVATED risk (event-driven moves/settlement
+# mechanics can behave differently than ordinary trading). A market
+# already PAST close_time (negative hours) is NOT flagged -- it's settled
+# or near-settled, which is safe, not risky (matches the existing
+# KXEOWEEK "likely near-settled" thesis in WATCHED_MARKET_TICKERS above).
+EVENT_CALENDAR_WARNING_HOURS = 48
+
+# --------------------------------------------------------------------------
+# Crowding-aware market screening (opt-in; used by incentive_screener.py's
+# manual "python3 incentive_screener.py" workflow -- see README Step 1 --
+# NOT the always-running pipeline's incentive_refresh_loop/main.py, so it
+# never adds REST call volume to the live run).
+# --------------------------------------------------------------------------
+# How many of the cheap reward-density-ranked candidates get a live
+# crowding/volatility check (one get_orderbook + one get_trades call
+# each). Keeps live-call volume bounded regardless of how many active
+# programs exist -- mirrors market_switcher.find_replacement's same
+# bounded-candidate-check pattern.
+SCREENER_LIVE_CHECK_POOL_SIZE = 15
+
+# Number of recent trades used to estimate a candidate's recent
+# volatility (stdev of trade prices, in cents) during crowding-aware
+# screening.
+SCREENER_VOLATILITY_LOOKBACK_TRADES = 50
 
 # --------------------------------------------------------------------------
 # Storage

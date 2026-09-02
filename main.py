@@ -48,6 +48,7 @@ from logger import SimulationLogger
 import quoting_policy
 from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
+from event_calendar import event_refresh_loop
 from singleton_lock import acquire_singleton_lock
 from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement
 
@@ -440,6 +441,7 @@ async def run() -> None:
         scoring_loop(orderbook_manager, states, sim_logger),
         incentive_refresh_loop(rest_client, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
         news_refresh_loop(rest_client, states, sim_logger, config.NEWS_POLL_INTERVAL_SEC),
+        event_refresh_loop(rest_client, states, sim_logger, config.EVENT_CALENDAR_POLL_INTERVAL_SEC),
         market_switch_loop(rest_client, ws_client, orderbook_manager, states, sim_logger, config.MARKET_SWITCH_CHECK_INTERVAL_SEC),
     )
 

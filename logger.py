@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS market_switches (
     net_yes_contracts_flattened INTEGER  -- NULL if there was nothing to flatten
 );
 
+CREATE TABLE IF NOT EXISTS event_calendar_snapshots (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    close_time TEXT,           -- ISO8601, NULL if unavailable this poll
+    hours_until_close REAL,    -- NULL if unavailable this poll
+    flagged INTEGER NOT NULL   -- whether this nudged risk toward ELEVATED
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
@@ -118,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ti
 CREATE INDEX IF NOT EXISTS idx_news_events_ticker_ts ON news_events(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_ts ON quote_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_market_switches_ts ON market_switches(ts);
+CREATE INDEX IF NOT EXISTS idx_event_calendar_ticker_ts ON event_calendar_snapshots(ticker, ts);
 """
 
 
@@ -312,4 +321,20 @@ class SimulationLogger:
                    (ts, old_ticker, new_ticker, reason, net_yes_contracts_flattened)
                    VALUES (?, ?, ?, ?, ?)""",
                 (ts or time.time(), old_ticker, new_ticker, reason, net_yes_contracts_flattened),
+            )
+
+    def log_event_calendar_snapshot(
+        self,
+        ticker: str,
+        close_time: str | None,
+        hours_until_close: float | None,
+        flagged: bool,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO event_calendar_snapshots
+                   (ts, ticker, close_time, hours_until_close, flagged)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, close_time, hours_until_close, int(flagged)),
             )

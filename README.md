@@ -167,11 +167,13 @@ several quiet weeks, that market is a candidate for the small live pilot
 3. **Quoting policy.** `quoting_policy.compute_quote` rests at the live
    Reference Price (not just the touch) before applying inventory skew
    and risk-based widening/pulling — see `risk_engine.py` for the
-   LOW/ELEVATED/HIGH escalation and `market_switcher.py` (opt-in, off by
-   default) for switching away from a market that sustains HIGH risk or
-   high crowding. Still intentionally simple relative to a fully
-   optimized policy — the point of Phase 0 is a measurable baseline to
-   improve on, not a finished strategy.
+   LOW/ELEVATED/HIGH escalation (now also fed by `event_calendar.py`'s
+   close-time proximity flag, alongside volatility, inventory, and news)
+   and `market_switcher.py` (enabled as of 2026-09-02) for switching away
+   from a market that sustains HIGH risk or high crowding. Still
+   intentionally simple relative to a fully optimized policy — the point
+   of Phase 0 is a measurable baseline to improve on, not a finished
+   strategy.
 
 4. **Target Size / Discount Factor.** `main.py` now seeds each watched
    market's `MarketRuntimeState` with the real `target_size` and
@@ -196,6 +198,7 @@ forecast) while we tighten the model with real observed data.
 | `reward_simulator.py` | Implements the actual scoring formula |
 | `adverse_selection_sim.py` | Hypothetical inventory + P&L from trade flow |
 | `logger.py` | SQLite persistence |
+| `event_calendar.py` | Feeds real close/resolution-time proximity into `risk_engine.py` |
 | `main.py` | Orchestrates everything |
 | `server.py` | Read-only FastAPI dashboard, streams `data/paper_trading.sqlite` over `/ws` |
 | `templates/dashboard.html` | Dashboard single-page UI (markets, depth, fills, chart) |
