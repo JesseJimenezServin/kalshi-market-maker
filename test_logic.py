@@ -564,6 +564,35 @@ def test_market_switcher_trigger_requires_sustain_and_cooldown():
     print("test_market_switcher_trigger_requires_sustain_and_cooldown: PASS")
 
 
+def test_market_switcher_backs_off_after_failed_search_not_just_successful_switch():
+    """
+    Regression test for a live incident (2026-09-02): both watched
+    markets were far more crowded than any replacement candidate, so
+    find_replacement kept returning None, and a sustained-triggered
+    ticker with no qualifying replacement re-ran the full search
+    (screen_incentive_programs + up to N live get_orderbook calls) every
+    check interval indefinitely -- because previously only a SUCCESSFUL
+    switch reset the cooldown. record_search_attempt() must throttle
+    retries the same way, called on every attempt whether or not it
+    succeeds (see main.py's market_switch_loop).
+    """
+    switcher = MarketSwitcher()
+    t0 = 1_000_000.0
+
+    assert switcher.check_trigger("A", HIGH, None, now=t0) is None
+    trigger = switcher.check_trigger("A", HIGH, None, now=t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 1)
+    assert trigger == "volatile", trigger
+
+    # Simulate find_replacement returning None -- no successful switch,
+    # but the search attempt itself must still start the cooldown.
+    switcher.record_search_attempt(now=t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 1)
+
+    # Immediately after, even though the condition still holds, retrying
+    # must be blocked by the cooldown -- NOT fire again right away.
+    assert switcher.check_trigger("A", HIGH, None, now=t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 2) is None
+    print("test_market_switcher_backs_off_after_failed_search_not_just_successful_switch: PASS")
+
+
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_orderbook_delta_unrecognized_shape_marks_stale_not_crash()
@@ -588,4 +617,5 @@ if __name__ == "__main__":
     test_risk_engine_event_proximity_escalates_within_window()
     test_estimate_crowding_and_volatility_from_fake_client()
     test_adjusted_score_dampens_for_crowding_and_volatility()
+    test_market_switcher_backs_off_after_failed_search_not_just_successful_switch()
     print("\nALL TESTS PASSED")

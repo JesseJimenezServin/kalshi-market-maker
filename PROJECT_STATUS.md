@@ -349,6 +349,35 @@ sustained data-collection window.
   2026-09-01 should be treated as unreliable for anything inventory/P&L
   related.
 
+## 2026-09-02 INCIDENT (caught before the 2-week run, fixed same day)
+Within minutes of enabling config.MARKET_SWITCHER_ENABLED=True on the live
+run, both watched markets (KXCITYCHAMPS, KXNFLSTADIUM) sustained a
+"crowded" trigger (real resting depth 12x/23x target_size -- far above
+CROWDING_RATIO_THRESHOLD=3.0) with no qualifying replacement candidate
+available (find_replacement kept returning None). Because only a
+SUCCESSFUL switch reset the cooldown, the switcher re-ran its full search
+(a paginated screen_incentive_programs call + up to 10 live get_orderbook
+calls) every ~30-40s, indefinitely, instead of respecting
+MARKET_SWITCH_COOLDOWN_SEC (30 min) -- observed live via repeated "No
+replacement candidate found" log lines a few seconds apart. Left running
+unattended for 2 weeks this would have hammered Kalshi's REST API
+continuously and risked rate-limiting/IP throttling.
+Response: added MarketSwitcher.record_search_attempt() (called after
+ANY search attempt, successful or not) so a failed search now respects
+the same cooldown as a successful switch. New regression test
+(test_market_switcher_backs_off_after_failed_search_not_just_successful_switch);
+24/24 tests passing. Restarted live; awaiting the next natural trigger
+(requires the condition to sustain 5 more minutes post-restart) to
+confirm live, though the unit test directly covers the fixed code path.
+SEPARATE, STILL-OPEN finding from this same incident: both currently
+watched markets are far too crowded by the Liquidity Incentive Program's
+own criteria for a new entrant to earn a meaningful share right now --
+worth reconsidering the watch list (via incentive_screener.py's new
+crowding_aware mode) before or during the 2-week run, not just relying
+on the switcher to find something better on its own (no candidate under
+SWITCH_CANDIDATE_MAX_CROWDING_RATIO=1.0 was found among the top 10
+reward-density candidates checked).
+
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline (risk
    engine, reference-price quoting, market switcher now armed, news +

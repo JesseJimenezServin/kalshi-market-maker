@@ -301,7 +301,16 @@ async def market_switch_loop(
             # are blocking `requests` calls -- keep them off the event loop.
             replacement = await asyncio.to_thread(find_replacement, rest_client, set(states.keys()))
             if replacement is None:
-                continue  # stay put; retried next interval if still triggered
+                # Throttle retries via the same cooldown as a successful
+                # switch -- otherwise a sustained-triggered ticker with no
+                # qualifying replacement re-runs this full search (a
+                # paginated incentive-program scan + up to N live
+                # get_orderbook calls) every check interval indefinitely.
+                # See MarketSwitcher.record_search_attempt's docstring for
+                # the live incident this fixes.
+                switcher.record_search_attempt()
+                logger.info("%s: no replacement found -- backing off for the switch cooldown before retrying", ticker)
+                continue
 
             fill = quoting_policy.flatten_position(
                 book, state.inventory, config.MAX_SIMULATED_INVENTORY, reason=f"market_switch_{trigger}",

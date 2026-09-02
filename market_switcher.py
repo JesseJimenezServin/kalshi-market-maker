@@ -105,9 +105,25 @@ class MarketSwitcher:
 
         return condition if (sustained and cooled_down) else None
 
-    def record_switch(self, now: float | None = None) -> None:
+    def record_search_attempt(self, now: float | None = None) -> None:
+        """
+        Called after ANY search attempt -- successful switch or not -- to
+        throttle how often find_replacement (screen_incentive_programs +
+        up to N live get_orderbook calls) runs. Without this, a ticker
+        that stays sustained-triggered with no qualifying replacement
+        available would re-run the full search every check interval
+        indefinitely -- OBSERVED LIVE 2026-09-02: both watched markets
+        were far more crowded (12x/23x target_size) than any candidate
+        under SWITCH_CANDIDATE_MAX_CROWDING_RATIO, so find_replacement
+        kept returning None and the search re-ran every ~30-40s
+        continuously, hammering the REST API for as long as the
+        condition held instead of respecting the cooldown.
+        """
         self._last_switch_ts = now if now is not None else time.time()
         self._condition_since.clear()
+
+    def record_switch(self, now: float | None = None) -> None:
+        self.record_search_attempt(now)
 
     def clear_ticker(self, ticker: str) -> None:
         self._condition_since.pop(ticker, None)
