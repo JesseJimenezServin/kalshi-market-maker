@@ -68,15 +68,11 @@ WATCHED_MARKET_TICKERS: list[str] = [
     "KXCITYCHAMPS-MIA30JUL01HDMP-2",  # Miami teams 2+ championships by 2030 -- multi-year horizon
     "KXNFLSTADIUM-28SEP01EVERBRENO-Y",  # Jacksonville stadium renovation before 2028 -- slow-moving fact
 
-    # TEMPORARY stress-test addition (2026-09-01), NOT part of the quiet-
-    # market thesis test above -- added deliberately to force real deltas/
-    # trades/risk-escalation quickly (has an active incentive program AND
-    # real volume -- a weather market was tried first but had no active
-    # incentive program, so it wouldn't have exercised scoring_loop/
-    # RiskEngine/quoting_policy at all, only orderbook parsing) so we can
-    # confirm the full pipeline under real activity before the long
-    # unattended run. Remove once confirmed working.
-    "KXMLBPLAYOFFS-26-SD",  # Pro Baseball Playoff Qualifiers (San Diego) -- moves with live games
+    # KXMLBPLAYOFFS-26-SD was added 2026-09-01 as a temporary stress-test
+    # ticker and removed the same day after confirming the pipeline (it
+    # found and fixed two real bugs: a broken resync request, and a
+    # shared-vs-per-ticker sequence tracking bug -- see PROJECT_STATUS.md
+    # and git history). Back to just the quiet-market thesis test above.
 ]
 
 # How often to poll REST endpoints that don't have a WebSocket equivalent
