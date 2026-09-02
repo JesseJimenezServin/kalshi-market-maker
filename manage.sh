@@ -90,12 +90,12 @@ target="${2:-both}"
 
 case "$cmd" in
   start)
-    [ "$target" = "main" ] || [ "$target" = "both" ] && start_one main main.py
-    [ "$target" = "server" ] || [ "$target" = "both" ] && start_one server server.py
+    if [ "$target" = "main" ] || [ "$target" = "both" ]; then start_one main main.py; fi
+    if [ "$target" = "server" ] || [ "$target" = "both" ]; then start_one server server.py; fi
     ;;
   stop)
-    [ "$target" = "main" ] || [ "$target" = "both" ] && stop_one main
-    [ "$target" = "server" ] || [ "$target" = "both" ] && stop_one server
+    if [ "$target" = "main" ] || [ "$target" = "both" ]; then stop_one main; fi
+    if [ "$target" = "server" ] || [ "$target" = "both" ]; then stop_one server; fi
     ;;
   restart)
     "$0" stop "$target"
@@ -110,3 +110,4 @@ case "$cmd" in
     exit 1
     ;;
 esac
+exit 0

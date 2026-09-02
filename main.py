@@ -243,6 +243,7 @@ async def incentive_refresh_loop(
                         target_size=program.target_size,
                         discount_factor_bps=program.discount_factor_bps,
                         days_remaining=program.days_remaining,
+                        total_period_days=program.total_period_days,
                     )
         except Exception:
             logger.exception("Incentive screen failed")

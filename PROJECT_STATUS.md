@@ -141,18 +141,34 @@ sustained data-collection window.
   HIGH/ELEVATED/skewed-quote/flash paths real data hadn't naturally
   exercised yet. Purely additive/visualization -- no simulation logic or
   order-placing code touched, re-verified via grep.
+- 2026-09-01 (completed): Fixed analysis.py's estimated-reward figure,
+  which was projecting ~1 hour of observed data straight across an
+  ENTIRE 14-day, $50,000 program period with zero time-scaling (e.g. one
+  ticker showed a ~$6,900 "estimate" off ~1 hour of data). Added
+  start_date to ScreenedProgram (incentive_screener.py) and a
+  total_period_days column to incentive_program_snapshots (logger.py, w/
+  in-place ALTER TABLE migration since the table already existed on
+  disk), and split the output into `EstSoFar` (properly prorated by
+  hours_observed / total_period_hours -- the honest "what has this earned
+  so far" answer) vs. the old figure, relabeled `IfFullPeriod` (a
+  forward-looking projection only, explicitly not something already
+  earned). Same two tickers now show $6.91 and $25.33 "so far" instead of
+  $1,884 and $6,905 -- in line with what a ~1hr sample should plausibly
+  support. New regression test for ScreenedProgram.total_period_days;
+  16/16 tests passing.
 
 ## Known simplifications / open items
-- analysis.py's estimated dollar reward is an OPTIMISTIC UPPER BOUND, not
-  a guaranteed figure: it assumes no double-counting with other
-  participants resting at our exact quoted price (same simplification as
-  reward_simulator.py's my_share estimate), and assumes the Time Period
-  Score aggregates as a simple average of snapshot scores over however
-  much of the window we've collected so far -- unverified against
-  Kalshi's real methodology, and it does NOT scale down for elapsed time
-  vs. the full program period (period_reward is the full-period pool;
-  our average score so far may only reflect a few hours of a
-  multi-day period).
+- analysis.py's `EstSoFar`/`IfFullPeriod` dollar rewards are OPTIMISTIC
+  UPPER BOUNDS, not guaranteed figures: they assume no double-counting
+  with other participants resting at our exact quoted price (same
+  simplification as reward_simulator.py's my_share estimate), and assume
+  the Time Period Score aggregates as a simple average of snapshot scores
+  over however much of the window we've collected so far -- unverified
+  against Kalshi's real methodology. `EstSoFar` IS now properly prorated
+  by elapsed time vs. the full program period (fixed 2026-09-01), but
+  still assumes our observed average score is representative of the rest
+  of the period, just time-scaled -- not adjusted for anything else
+  (volatility regime changes, other LPs arriving/leaving, etc.).
 - News-awareness signal is zero-cost (GDELT + keyword heuristic, no LLM
   classification, no paid APIs). Quality is a known limitation vs. a
   true NLP/LLM classifier -- expect false positives/negatives; flagged as

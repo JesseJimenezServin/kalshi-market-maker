@@ -4,7 +4,7 @@ reconstruction, the reward-scoring formula, and the inventory simulator.
 Run with: python3 test_logic.py
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from orderbook import OrderbookManager, MarketBook
 from reward_simulator import compute_reference_price, score_hypothetical_order, score_both_sides
@@ -219,12 +219,14 @@ def test_process_trade_for_inventory_end_to_end():
 
 
 def test_build_market_states_uses_real_incentive_program_values():
+    now = datetime.now(timezone.utc)
     program = ScreenedProgram(
         market_ticker="FOUND-TICKER",
         period_reward=500.0,
         target_size=750.0,
         discount_factor_bps=8500,
-        end_date=datetime.now(timezone.utc),
+        start_date=now - timedelta(days=4),
+        end_date=now,
         days_remaining=3.0,
         reward_density_score=1.0,
         raw={},
@@ -241,6 +243,10 @@ def test_build_market_states_uses_real_incentive_program_values():
 
     # No active program for this ticker -> should be skipped, not defaulted.
     assert "MISSING-TICKER" not in states
+
+    # Regression check for the 2026-09-01 estimate-inflation bug: total
+    # program period length must be derivable (here, 4 days).
+    assert abs(program.total_period_days - 4.0) < 1e-6
     print("test_build_market_states_uses_real_incentive_program_values: PASS")
 
 

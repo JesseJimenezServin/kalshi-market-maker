@@ -32,10 +32,16 @@ class ScreenedProgram:
     period_reward: float
     target_size: float
     discount_factor_bps: int
+    start_date: datetime
     end_date: datetime
     days_remaining: float
     reward_density_score: float  # higher = more attractive, arbitrary units
     raw: dict
+
+    @property
+    def total_period_days(self) -> float:
+        """Full program period length, e.g. 14.0 for a 2-week program."""
+        return (self.end_date - self.start_date).total_seconds() / 86400.0
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -70,6 +76,7 @@ def screen_incentive_programs(
     screened: list[ScreenedProgram] = []
     for p in programs:
         try:
+            start_date = _parse_iso(p["start_date"])
             end_date = _parse_iso(p["end_date"])
             days_remaining = (end_date - now).total_seconds() / 86400
             if days_remaining < min_days_remaining:
@@ -91,6 +98,7 @@ def screen_incentive_programs(
                     period_reward=period_reward,
                     target_size=target_size,
                     discount_factor_bps=discount_factor_bps,
+                    start_date=start_date,
                     end_date=end_date,
                     days_remaining=days_remaining,
                     reward_density_score=score,

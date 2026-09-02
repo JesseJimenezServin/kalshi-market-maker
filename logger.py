@@ -57,7 +57,14 @@ CREATE TABLE IF NOT EXISTS incentive_program_snapshots (
     period_reward REAL,
     target_size REAL,
     discount_factor_bps INTEGER,
-    days_remaining REAL
+    days_remaining REAL,
+    total_period_days REAL  -- full program period length, e.g. 14.0 for a
+                            -- 2-week program -- needed to fairly prorate
+                            -- an estimated reward by how much of the
+                            -- period we've actually observed (see
+                            -- analysis.py; added after a 2026-09-01 estimate
+                            -- projected a ~1hr sample across an entire
+                            -- 14-day pool with no time-scaling at all)
 );
 
 CREATE TABLE IF NOT EXISTS simulated_stop_losses (
@@ -122,6 +129,17 @@ class SimulationLogger:
     def _init_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """
+        Lightweight in-place migrations for columns added after a table
+        may already exist on disk -- CREATE TABLE IF NOT EXISTS alone
+        won't add a new column to a pre-existing table.
+        """
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(incentive_program_snapshots)")}
+        if "total_period_days" not in existing_cols:
+            conn.execute("ALTER TABLE incentive_program_snapshots ADD COLUMN total_period_days REAL")
 
     def log_snapshot_score(
         self,
@@ -200,14 +218,17 @@ class SimulationLogger:
         target_size: float,
         discount_factor_bps: int,
         days_remaining: float,
+        total_period_days: float | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO incentive_program_snapshots
-                   (ts, ticker, period_reward, target_size, discount_factor_bps, days_remaining)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (ts or time.time(), ticker, period_reward, target_size, discount_factor_bps, days_remaining),
+                   (ts, ticker, period_reward, target_size, discount_factor_bps,
+                    days_remaining, total_period_days)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, period_reward, target_size, discount_factor_bps,
+                 days_remaining, total_period_days),
             )
 
     def log_simulated_stop_loss(
