@@ -161,6 +161,19 @@ async def scoring_loop(
                 config.MAX_SIMULATED_INVENTORY,
             )
 
+            # Pure instrumentation for the dashboard (server.py) -- main.py
+            # and server.py are separate processes with no shared memory,
+            # so this is the only way the dashboard can see the current
+            # quote/risk level. Does not affect any risk/quoting decision.
+            sim_logger.log_quote_snapshot(
+                ticker=ticker,
+                risk_level=state.risk_engine.risk_level,
+                quote_yes_price=state.quote.yes_price if state.quote else None,
+                quote_yes_size=state.quote.yes_size if state.quote else None,
+                quote_no_price=state.quote.no_price if state.quote else None,
+                quote_no_size=state.quote.no_size if state.quote else None,
+            )
+
             fill = quoting_policy.maybe_execute_stop_loss(
                 book,
                 state.inventory,

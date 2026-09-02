@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS news_events (
                      -- ArtList mode doesn't reliably provide these
 );
 
+CREATE TABLE IF NOT EXISTS quote_snapshots (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    -- NULL for all four when the quote is pulled (HIGH risk) -- pure
+    -- instrumentation for the dashboard, purely additive: main.py's
+    -- risk_engine/quoting_policy decisions are unaffected by this table.
+    quote_yes_price INTEGER,
+    quote_yes_size REAL,
+    quote_no_price INTEGER,
+    quote_no_size REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
@@ -88,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts ON orderbook_snapshots(ticker
 CREATE INDEX IF NOT EXISTS idx_incentive_snap_ticker_ts ON incentive_program_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_news_events_ticker_ts ON news_events(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_ts ON quote_snapshots(ticker, ts);
 """
 
 
@@ -232,4 +246,24 @@ class SimulationLogger:
                    (ts, ticker, headline, source_url, relevance_score, theme_tags)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, headline, source_url, relevance_score, json.dumps(theme_tags)),
+            )
+
+    def log_quote_snapshot(
+        self,
+        ticker: str,
+        risk_level: str,
+        quote_yes_price: int | None,
+        quote_yes_size: float | None,
+        quote_no_price: int | None,
+        quote_no_size: float | None,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO quote_snapshots
+                   (ts, ticker, risk_level, quote_yes_price, quote_yes_size,
+                    quote_no_price, quote_no_size)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ts or time.time(), ticker, risk_level,
+                 quote_yes_price, quote_yes_size, quote_no_price, quote_no_size),
             )

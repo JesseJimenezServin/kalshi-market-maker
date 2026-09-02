@@ -13,6 +13,10 @@ per second, built entirely from SQL queries against the SQLite file:
   - orderbook_snapshots -> per-market order book depth (for the depth bars)
   - incentive_program_snapshots -> per-market target size / discount factor / pool
   - simulated_fills    -> the 10 most recent simulated fills
+  - quote_snapshots    -> current hypothetical quote + risk level per market
+                          (main.py logs this purely for this dashboard --
+                          server.py and main.py are separate processes with
+                          no shared memory)
 
 Run with:
     python3 server.py
@@ -84,6 +88,34 @@ def _recent_fills(conn: sqlite3.Connection, limit: int = RECENT_FILLS_LIMIT) -> 
     return [dict(r) for r in rows]
 
 
+def _qualifying_counts(conn: sqlite3.Connection) -> dict[str, dict]:
+    """
+    Running count (over everything collected so far) of "clean" snapshots
+    where both sides reached Target Size, vs. total -- reuses the same
+    qualifies_yes/qualifies_no values main.py already computed and logged,
+    no rescoring.
+    """
+    rows = conn.execute(
+        """
+        SELECT ticker,
+               SUM(CASE WHEN qualifies_yes = 1 AND qualifies_no = 1 THEN 1 ELSE 0 END) AS qualifying,
+               COUNT(*) AS total
+        FROM snapshot_scores
+        GROUP BY ticker
+        """
+    ).fetchall()
+    return {r["ticker"]: {"qualifying": r["qualifying"], "total": r["total"]} for r in rows}
+
+
+def _recent_event_tickers(conn: sqlite3.Connection, since_ts: float) -> set[str]:
+    """Tickers with a new simulated_fills or simulated_stop_losses row since since_ts."""
+    tickers: set[str] = set()
+    for table in ("simulated_fills", "simulated_stop_losses"):
+        rows = conn.execute(f"SELECT DISTINCT ticker FROM {table} WHERE ts > ?", (since_ts,)).fetchall()
+        tickers.update(r["ticker"] for r in rows)
+    return tickers
+
+
 def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     """
     Two proxy series, computed in Python from the last HISTORY_ROW_CAP rows
@@ -121,7 +153,14 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     return {"reward_score": reward_series, "pnl_dollars": pnl_series}
 
 
-def build_dashboard_payload() -> dict:
+def build_dashboard_payload(since_ts: float | None = None) -> dict:
+    """
+    since_ts: if given, markets with a simulated_fills/simulated_stop_losses
+    row newer than this get "flash": true, for a one-shot visual highlight
+    on the dashboard. Each WebSocket connection tracks its own since_ts
+    (the ts of its previous tick), so every connected client sees each
+    event flash exactly once, independent of other clients.
+    """
     conn = _connect()
     try:
         scores = _latest_per_ticker(
@@ -139,9 +178,16 @@ def build_dashboard_payload() -> dict:
             "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining",
         )
         books = _latest_per_ticker(conn, "orderbook_snapshots", "ticker, ts, yes_levels, no_levels")
+        quotes = _latest_per_ticker(
+            conn, "quote_snapshots",
+            "ticker, ts, risk_level, quote_yes_price, quote_yes_size, quote_no_price, quote_no_size",
+        )
+        qualifying_counts = _qualifying_counts(conn)
+        flash_tickers = _recent_event_tickers(conn, since_ts) if since_ts is not None else set()
 
         tickers = sorted(
-            set(scores) | set(inventory) | set(programs) | set(books) | set(config.WATCHED_MARKET_TICKERS)
+            set(scores) | set(inventory) | set(programs) | set(books) | set(quotes)
+            | set(config.WATCHED_MARKET_TICKERS)
         )
 
         markets = []
@@ -150,6 +196,8 @@ def build_dashboard_payload() -> dict:
             inv = inventory.get(ticker)
             score = scores.get(ticker)
             book = books.get(ticker)
+            quote_row = quotes.get(ticker)
+            qual = qualifying_counts.get(ticker, {"qualifying": 0, "total": 0})
 
             daily_pool = None
             discount_factor = None
@@ -162,9 +210,25 @@ def build_dashboard_payload() -> dict:
                     # already uses -- not a literal daily-reset figure.
                     daily_pool = program["period_reward"] / program["days_remaining"]
 
+            unrealized_pnl = None
+            realized_pnl = None
             net_pnl = None
+            net_yes_contracts = None
             if inv is not None:
-                net_pnl = ((inv["unrealized_pnl_cents"] or 0.0) + (inv["realized_pnl_cents"] or 0.0)) / 100.0
+                unrealized_pnl = (inv["unrealized_pnl_cents"] or 0.0) / 100.0
+                realized_pnl = (inv["realized_pnl_cents"] or 0.0) / 100.0
+                net_pnl = unrealized_pnl + realized_pnl
+                net_yes_contracts = inv["net_yes_contracts"]
+
+            risk_level = quote_row["risk_level"] if quote_row is not None else None
+            quote = None
+            if quote_row is not None and quote_row["quote_yes_price"] is not None:
+                quote = {
+                    "yes_price": quote_row["quote_yes_price"],
+                    "yes_size": quote_row["quote_yes_size"],
+                    "no_price": quote_row["quote_no_price"],
+                    "no_size": quote_row["quote_no_size"],
+                }
 
             markets.append({
                 "ticker": ticker,
@@ -172,9 +236,17 @@ def build_dashboard_payload() -> dict:
                 "discount_factor": discount_factor,
                 "daily_pool": daily_pool,
                 "net_pnl": net_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "realized_pnl": realized_pnl,
+                "net_yes_contracts": net_yes_contracts,
                 "qualifies_yes": bool(score["qualifies_yes"]) if score is not None else None,
                 "qualifies_no": bool(score["qualifies_no"]) if score is not None else None,
                 "combined_score": score["combined_score"] if score is not None else None,
+                "qualifying_snapshots": qual["qualifying"],
+                "total_snapshots": qual["total"],
+                "risk_level": risk_level,
+                "quote": quote,  # None if pulled (HIGH risk) or no data logged yet
+                "flash": ticker in flash_tickers,
                 "orderbook": {
                     "yes_levels": json.loads(book["yes_levels"]),
                     "no_levels": json.loads(book["no_levels"]),
@@ -208,9 +280,15 @@ async def status() -> dict:
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info("Dashboard WebSocket client connected")
+    # Per-connection watermark for "new since last tick" fill/stop-loss
+    # detection -- each client independently sees every event flash
+    # exactly once, regardless of how many other clients are connected.
+    since_ts = time.time()
     try:
         while True:
-            payload = await asyncio.to_thread(build_dashboard_payload)
+            next_since_ts = time.time()
+            payload = await asyncio.to_thread(build_dashboard_payload, since_ts)
+            since_ts = next_since_ts
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:

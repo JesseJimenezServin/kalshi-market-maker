@@ -15,6 +15,7 @@
     --red: #f85149;
     --yellow: #d29922;
     --accent: #58a6ff;
+    --quote: #bc8cff;
   }
   * { box-sizing: border-box; }
   body {
@@ -57,6 +58,9 @@
   .badge.demo { color: var(--yellow); border-color: var(--yellow); }
   .badge.prod { color: var(--accent); border-color: var(--accent); }
   .badge.readonly { color: var(--green); border-color: var(--green); }
+  .badge.low { color: var(--green); border-color: var(--green); }
+  .badge.elevated { color: var(--yellow); border-color: var(--yellow); }
+  .badge.high { color: var(--red); border-color: var(--red); }
 
   main {
     display: grid;
@@ -93,6 +97,7 @@
   }
   tbody tr { border-bottom: 1px solid #1a2129; }
   tbody tr:hover { background: #161d25; }
+  tbody tr.flash-row { background: rgba(255, 214, 10, 0.16); }
   .pos { color: var(--green); }
   .neg { color: var(--red); }
   .muted { color: var(--muted); }
@@ -117,6 +122,29 @@
   .depth-bar { height: 100%; }
   .depth-bar.yes { background: var(--green); }
   .depth-bar.no { background: var(--red); }
+
+  .depth-row.our-quote {
+    border: 1px dashed var(--quote);
+    border-radius: 3px;
+    padding: 1px 2px;
+    background: rgba(188, 140, 255, 0.08);
+  }
+  .depth-row.our-quote.grayed {
+    border-color: var(--muted);
+    background: rgba(125, 136, 148, 0.06);
+    opacity: 0.65;
+  }
+  .our-quote-label {
+    font-size: 9px;
+    color: var(--quote);
+    border: 1px solid var(--quote);
+    border-radius: 3px;
+    padding: 0 4px;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+  .depth-row.our-quote.grayed .our-quote-label { color: var(--muted); border-color: var(--muted); }
+  .depth-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
   .empty-state { color: var(--muted); padding: 20px 0; text-align: center; }
 
@@ -147,21 +175,32 @@
       <thead>
         <tr>
           <th>Ticker</th>
+          <th>Risk</th>
           <th>Target Size</th>
           <th>Discount Factor</th>
           <th>Daily Pool ($)</th>
           <th>Combined Score</th>
+          <th>Qual/Total</th>
+          <th>Net Pos</th>
+          <th>Unrealized</th>
           <th>Net P&amp;L</th>
         </tr>
       </thead>
-      <tbody><tr><td colspan="6" class="empty-state">Waiting for data...</td></tr></tbody>
+      <tbody><tr><td colspan="10" class="empty-state">Waiting for data...</td></tr></tbody>
     </table>
   </section>
 
   <section class="panel">
-    <h2>Order Book Depth <select id="depth-ticker-select"></select></h2>
+    <div class="depth-panel-header">
+      <h2 style="margin:0;">Order Book Depth <select id="depth-ticker-select"></select></h2>
+      <span id="depth-risk-badge" class="badge"></span>
+    </div>
     <div id="depth-container" class="depth-wrap">
       <div class="empty-state">No order book data yet.</div>
+    </div>
+    <div class="muted" style="margin-top:8px; font-size:11px;">
+      Dashed purple outline = our hypothetical resting quote at that price level (not real depth).
+      Grayed out when risk is ELEVATED (quote widened); absent entirely when HIGH (quote pulled).
     </div>
   </section>
 
@@ -201,6 +240,12 @@
 let lastPayload = null;
 let selectedTicker = null;
 let chart = null;
+// ticker -> epoch ms until which its row should show the flash highlight.
+// Tracked client-side (not just the payload's transient flash flag) so
+// the highlight stays visible for a few render ticks instead of blinking
+// for a single 1s frame.
+const flashedUntil = {};
+const FLASH_DURATION_MS = 2500;
 
 function fmt(n, digits = 2) {
   if (n === null || n === undefined || Number.isNaN(n)) return "--";
@@ -212,22 +257,41 @@ function pnlClass(n) {
   return n > 0 ? "pos" : (n < 0 ? "neg" : "");
 }
 
+function riskBadgeHtml(riskLevel) {
+  if (!riskLevel) return "--";
+  return `<span class="badge ${riskLevel.toLowerCase()}">${riskLevel}</span>`;
+}
+
 function renderMarketsTable(markets) {
   const tbody = document.querySelector("#markets-table tbody");
   if (!markets || markets.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No watched markets yet -- add tickers to config.py.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No watched markets yet -- add tickers to config.py.</td></tr>';
     return;
   }
-  tbody.innerHTML = markets.map(m => `
-    <tr>
+
+  const now = Date.now();
+  markets.forEach(m => {
+    if (m.flash) flashedUntil[m.ticker] = now + FLASH_DURATION_MS;
+  });
+
+  tbody.innerHTML = markets.map(m => {
+    const isFlashing = flashedUntil[m.ticker] && now < flashedUntil[m.ticker];
+    const qualStr = m.total_snapshots ? `${m.qualifying_snapshots}/${m.total_snapshots}` : "--";
+    return `
+    <tr class="${isFlashing ? 'flash-row' : ''}">
       <td>${m.ticker}</td>
+      <td>${riskBadgeHtml(m.risk_level)}</td>
       <td>${m.target_size !== null ? fmt(m.target_size, 0) : '<span class="muted">no active program</span>'}</td>
       <td>${m.discount_factor !== null ? fmt(m.discount_factor, 4) : "--"}</td>
       <td>${m.daily_pool !== null ? "$" + fmt(m.daily_pool, 2) : "--"}</td>
       <td>${m.combined_score !== null ? fmt(m.combined_score, 4) : "--"}</td>
+      <td>${qualStr}</td>
+      <td>${m.net_yes_contracts !== null && m.net_yes_contracts !== undefined ? m.net_yes_contracts : "--"}</td>
+      <td class="${pnlClass(m.unrealized_pnl)}">${m.unrealized_pnl !== null ? "$" + fmt(m.unrealized_pnl, 2) : "--"}</td>
       <td class="${pnlClass(m.net_pnl)}">${m.net_pnl !== null ? "$" + fmt(m.net_pnl, 2) : "--"}</td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function renderFillsTable(fills) {
@@ -260,30 +324,61 @@ function updateTickerSelect(markets) {
   select.value = selectedTicker || "";
 }
 
+function withQuoteMarker(levels, quotePrice) {
+  // levels: [[price, size], ...]. Inserts a zero-size synthetic row for
+  // our quote price if it doesn't already coincide with a real level, so
+  // the "OUR QUOTE" marker always renders even where there's no real
+  // resting size at that exact price.
+  const rows = levels.map(([price, size]) => ({ price, size, isOurQuote: false }));
+  if (quotePrice !== null && quotePrice !== undefined) {
+    const existing = rows.find(r => r.price === quotePrice);
+    if (existing) {
+      existing.isOurQuote = true;
+    } else {
+      rows.push({ price: quotePrice, size: 0, isOurQuote: true });
+    }
+  }
+  rows.sort((a, b) => b.price - a.price);
+  return rows;
+}
+
 function renderDepth(markets) {
   const container = document.getElementById("depth-container");
+  const badge = document.getElementById("depth-risk-badge");
   const market = markets.find(m => m.ticker === selectedTicker);
+
   if (!market || !market.orderbook) {
     container.innerHTML = '<div class="empty-state">No order book data yet for this market.</div>';
+    badge.textContent = "";
+    badge.className = "badge";
     return;
   }
-  const { yes_levels, no_levels } = market.orderbook;
-  const maxSize = Math.max(1, ...yes_levels.map(l => l[1]), ...no_levels.map(l => l[1]));
 
-  const renderCol = (title, levels, cls) => `
+  badge.innerHTML = market.risk_level ? riskBadgeHtml(market.risk_level) : "";
+
+  const { yes_levels, no_levels } = market.orderbook;
+  const quote = market.quote;  // {yes_price, yes_size, no_price, no_size} or null (pulled / no data yet)
+  const isElevated = market.risk_level === "ELEVATED";
+
+  const yesRows = withQuoteMarker(yes_levels, quote ? quote.yes_price : null);
+  const noRows = withQuoteMarker(no_levels, quote ? quote.no_price : null);
+  const maxSize = Math.max(1, ...yesRows.map(r => r.size), ...noRows.map(r => r.size));
+
+  const renderCol = (title, rows, cls) => `
     <div class="depth-col">
       <h3>${title}</h3>
-      ${levels.length === 0 ? '<div class="muted">no resting size</div>' : levels.map(([price, size]) => `
-        <div class="depth-row">
-          <span class="depth-price">${price}c</span>
-          <div class="depth-bar-track"><div class="depth-bar ${cls}" style="width:${(size / maxSize) * 100}%"></div></div>
-          <span class="depth-size">${size}</span>
+      ${rows.length === 0 ? '<div class="muted">no resting size</div>' : rows.map(r => `
+        <div class="depth-row ${r.isOurQuote ? 'our-quote' + (isElevated ? ' grayed' : '') : ''}">
+          <span class="depth-price">${r.price}c</span>
+          <div class="depth-bar-track"><div class="depth-bar ${cls}" style="width:${(r.size / maxSize) * 100}%"></div></div>
+          <span class="depth-size">${r.size}</span>
+          ${r.isOurQuote ? '<span class="our-quote-label">OUR QUOTE</span>' : ''}
         </div>
       `).join("")}
     </div>
   `;
 
-  container.innerHTML = renderCol("YES bids", yes_levels, "yes") + renderCol("NO bids", no_levels, "no");
+  container.innerHTML = renderCol("YES bids", yesRows, "yes") + renderCol("NO bids", noRows, "no");
 }
 
 function initChart() {

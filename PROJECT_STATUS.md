@@ -30,7 +30,7 @@ sustained data-collection window.
   real trade flow against a hypothetical resting quote
 - logger.py -- SQLite persistence (snapshot_scores, simulated_fills,
   inventory_marks, orderbook_snapshots, incentive_program_snapshots,
-  simulated_stop_losses, news_events tables)
+  simulated_stop_losses, news_events, quote_snapshots tables)
 - risk_engine.py -- per-market RiskEngine: rolling mid-price volatility +
   inventory fraction -> composite LOW/ELEVATED/HIGH risk level
 - quoting_policy.py -- active quoting policy: inventory skew, widen/pull
@@ -43,8 +43,10 @@ sustained data-collection window.
   placed anywhere in this codebase (verified via grep, 2026-08-31)
 - server.py -- read-only FastAPI dashboard; streams data/paper_trading.sqlite
   over /ws once per second, never talks to Kalshi
-- templates/dashboard.html -- single-page dashboard UI (markets table,
-  order book depth bars, recent fills, performance chart)
+- templates/dashboard.html -- single-page dashboard UI (markets table w/
+  risk badge + qualifying-snapshot counts + net position, order book
+  depth bars with the hypothetical quote overlaid, recent fills,
+  performance chart, flash highlight on new fills/stop-losses)
 - analysis.py -- read-only report: ESTIMATED dollar reward per ticker
   (snapshot_scores joined against incentive_program_snapshots) printed
   alongside real adverse-selection P&L from inventory_marks. No simulated
@@ -116,6 +118,25 @@ sustained data-collection window.
   optimistic-upper-bound ESTIMATE (see "Known simplifications" below),
   not a guaranteed number -- does not change any simulation logic, purely
   reads existing SQLite tables.
+- 2026-09-01 (completed): Dashboard now visualizes the hypothetical quote
+  directly against the real order book, plus live score/inventory/
+  risk-level readouts, so continuous reward-eligibility is visible even
+  when simulated_fills stays at 0. New quote_snapshots SQLite table
+  (main.py logs risk level + current quote, or NULLs when pulled, every
+  tick -- pure instrumentation, no simulation-logic change) since
+  server.py and main.py are separate processes with no shared memory.
+  Watched Markets table gained Risk badge, Qualifying/Total snapshot
+  count, Net Position, and Unrealized P&L columns. Order Book Depth panel
+  overlays our hypothetical yes/no quote as a dashed purple "OUR QUOTE"
+  marker on the real depth (inserted as a zero-size row if our price
+  doesn't coincide with existing depth); grayed out at ELEVATED risk,
+  absent entirely at HIGH (quote pulled). New simulated_fill/
+  simulated_stop_loss events flash-highlight that market's table row for
+  ~2.5s. Verified against live data end-to-end, plus a synthetic-data
+  Node harness (no browser available in this environment) covering the
+  HIGH/ELEVATED/skewed-quote/flash paths real data hadn't naturally
+  exercised yet. Purely additive/visualization -- no simulation logic or
+  order-placing code touched, re-verified via grep.
 
 ## Known simplifications / open items
 - analysis.py's estimated dollar reward is an OPTIMISTIC UPPER BOUND, not
@@ -138,10 +159,11 @@ sustained data-collection window.
   True fix requires Phase 1 real fills, not fixable in pure simulation.
 - No hosting/deployment yet -- main.py and server.py both currently run
   locally only.
-- Stop-loss events (simulated_stop_losses) don't yet appear in server.py's
-  dashboard -- the "Recent Simulated Fills" panel only reads
-  simulated_fills. Not yet wired in; P&L chart is unaffected since it
-  reads inventory_marks, which reflects stop-loss impact automatically.
+- Stop-loss events (simulated_stop_losses) now flash-highlight their
+  market's row in real time, but still don't appear as rows in the
+  "Recent Simulated Fills" table itself -- that panel only reads
+  simulated_fills. P&L chart is unaffected since it reads inventory_marks,
+  which reflects stop-loss impact automatically.
 - Two planned workstreams, not yet started: scheduled-event calendar
   awareness (feeding known event/resolution timing into the quoting
   policy or market screener as a risk flag) and crowding-aware market
