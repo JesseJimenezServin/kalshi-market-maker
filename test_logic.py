@@ -4,8 +4,11 @@ reconstruction, the reward-scoring formula, and the inventory simulator.
 Run with: python3 test_logic.py
 """
 
+import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
+from logger import SCHEMA
 from orderbook import OrderbookManager, MarketBook
 from reward_simulator import compute_reference_price, score_hypothetical_order, score_both_sides
 from adverse_selection_sim import InventoryState, HypotheticalQuote, process_trade_for_inventory
@@ -19,7 +22,7 @@ from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
 from main import _select_initial_watchlist, MarketRuntimeState
 from capital_allocator import allocate_capital
-from server import _risk_reason
+from server import _risk_reason, _is_recent, _capital_allocation, _performance_history
 import config
 
 
@@ -785,6 +788,69 @@ def test_risk_reason_attributes_only_the_actual_driving_factor():
     print("test_risk_reason_attributes_only_the_actual_driving_factor: PASS")
 
 
+def test_is_recent_uses_cutoff():
+    now = time.time()
+    assert _is_recent({"ts": now - 1.0}, now) is True
+    assert _is_recent({"ts": now - 1000.0}, now) is False
+    assert _is_recent(None, now) is False
+    print("test_is_recent_uses_cutoff: PASS")
+
+
+def test_capital_allocation_drops_stale_tickers():
+    # Regression test for a live incident (2026-09-02): a ticker
+    # market_switcher.py had just switched AWAY from was still showing up
+    # in the allocation panel with its old allocation (345s stale by the
+    # time it was observed), duplicating the dollar figure of whichever
+    # ticker it had been switched away from/into. "Latest per ticker"
+    # alone means "latest EVER" -- must also be recent.
+    now = time.time()
+    inventory = {
+        "FRESH": {"ts": now - 0.5, "max_inventory": 400},
+        "STALE": {"ts": now - 345.0, "max_inventory": 562},
+    }
+    allocation = _capital_allocation(None, inventory, now)
+    tickers = {a["ticker"] for a in allocation}
+    assert tickers == {"FRESH"}, tickers
+    assert allocation[0]["pct"] == 100.0
+    print("test_capital_allocation_drops_stale_tickers: PASS")
+
+
+def test_performance_history_merges_per_ticker_rows_into_one_point_per_bucket():
+    # Regression test for a live incident (2026-09-02): pnl_dollars logged
+    # one point per (ticker, bucket) row -- with 3 tickers, ~3x as many
+    # points as reward_score's one-per-bucket. Chart.js plotted the two
+    # series against a shared x-axis sized to the LONGER series, so the
+    # shorter (reward_score) line visibly stopped partway across the
+    # chart instead of reaching "now", even though its data was current.
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+
+    bucket = config.PERFORMANCE_HISTORY_BUCKET_SECONDS
+    base = time.time() - 3 * bucket
+
+    for k in range(3):  # 3 distinct buckets
+        ts = base + k * bucket + 1.0
+        conn.execute(
+            "INSERT INTO snapshot_scores (ts, ticker, combined_score) VALUES (?, 'ANY', ?)",
+            (ts, 1.0),
+        )
+        for ticker in ("A", "B"):  # 2 tickers per bucket -> 6 rows total
+            conn.execute(
+                "INSERT INTO inventory_marks (ts, ticker, unrealized_pnl_cents, realized_pnl_cents) "
+                "VALUES (?, ?, 0, 0)",
+                (ts, ticker),
+            )
+    conn.commit()
+
+    history = _performance_history(conn)
+    assert len(history["reward_score"]) == 3, history["reward_score"]
+    assert len(history["pnl_dollars"]) == 3, history["pnl_dollars"]  # NOT 6
+    assert len(history["balance_dollars"]) == 3, history["balance_dollars"]
+    conn.close()
+    print("test_performance_history_merges_per_ticker_rows_into_one_point_per_bucket: PASS")
+
+
 def test_derive_keywords_ranks_capitalized_proper_nouns_first():
     # Real title observed live 2026-09-02 (KXMAMDANIEO-26SEP05-T0). The
     # old length-only ranking put "executive" (9 chars, generic) ahead
@@ -931,4 +997,7 @@ if __name__ == "__main__":
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()
+    test_is_recent_uses_cutoff()
+    test_capital_allocation_drops_stale_tickers()
+    test_performance_history_merges_per_ticker_rows_into_one_point_per_bucket()
     print("\nALL TESTS PASSED")

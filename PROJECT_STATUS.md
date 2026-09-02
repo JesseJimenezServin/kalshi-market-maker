@@ -85,7 +85,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 41/41 passing
+- test_logic.py -- offline unit tests, no network required, 44/44 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -576,6 +576,48 @@ reward-density candidates checked).
   an actual concurrent news_events hit) via a Node harness executing
   the actual render functions. Re-verified via grep that no
   order-placing code exists anywhere.
+
+## 2026-09-02 INCIDENT (caught live from the dashboard itself, fixed same day)
+User noticed the Reward Score chart's line stopped abruptly partway
+across the chart, and the Capital Allocation panel showed 4 dollar
+figures (562, 562, 288, 150 -- summing to $1562) for only 3 watched
+markets. Root causes, both in server.py, both introduced this session:
+
+1. **Chart stopping early**: pnl_dollars/balance_dollars logged one
+   point per (ticker, bucket) row, while reward_score logged one point
+   per bucket TOTAL -- with 3 tickers, pnl had ~3x as many points
+   (CONFIRMED: 169 vs 363 live). renderChart() plotted both series
+   against a SHARED x-axis of plain sequential point index sized to the
+   longer series, so the shorter (reward_score) line ran out of data
+   and visually stopped well before the chart's right edge -- even
+   though its underlying data was fully current (0.66s stale, not
+   actually behind at all). Fixed two ways: _performance_history now
+   merges all tickers' rows within a bucket into exactly ONE combined
+   point per bucket (matching reward_score's density), AND both charts
+   now use a real timestamp-based linear x-axis with {x, y} data points
+   instead of a shared index -- so even if point counts ever differ
+   again, each series lands at its own correct time position rather
+   than being silently misaligned.
+2. **Duplicate/stale allocation entries**: "latest per ticker" (the
+   pattern every other per-market field already uses) means "latest
+   EVER", not "currently watched" -- a ticker market_switcher.py had
+   switched away from just minutes earlier was still showing up with
+   its old allocation (345s stale vs. ~0.2s for genuinely active
+   tickers), duplicating the dollar figure of whichever ticker inherited
+   or shared that allocation. New RECENCY_CUTOFF_SEC (20s) + _is_recent()
+   helper, applied to _capital_allocation AND the main Watched Markets
+   table's ticker list (which had the identical, just less visually
+   obvious, problem -- 6 rows shown for 3 actually-active markets).
+   Falls back to the static config.WATCHED_MARKET_TICKERS list only if
+   NOTHING is currently active, preserving the original "helpful
+   pre-data hint" behavior for a genuinely fresh start.
+
+3 new tests (bucket-merge point count, stale-ticker exclusion, the
+recency cutoff itself); 44/44 passing. Verified live: allocation now
+shows exactly 3 tickers summing to exactly $1000, and reward_score/
+pnl_dollars/balance_dollars all report identically 170 points with
+matching end timestamps (~0.001s apart). Re-verified via grep that no
+order-placing code exists anywhere.
 
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks

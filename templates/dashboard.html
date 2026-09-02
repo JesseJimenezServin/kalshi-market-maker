@@ -485,11 +485,26 @@ function renderBalanceReadout(startingCapital, balanceSeries) {
   readout.className = "balance-readout " + (delta === null ? "" : pnlClass(delta));
 }
 
+function timeTickCallback(value) {
+  return new Date(value * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Both charts use a LINEAR x-axis of real epoch-second timestamps (not
+// point index) with {x, y} data points, not a shared `labels` array.
+// CONFIRMED live 2026-09-02: reward_score and pnl_dollars/balance_dollars
+// series have different point counts (pnl logs one point per ticker per
+// bucket vs. reward's one per bucket total) -- sharing a plain
+// sequential-index x-axis meant whichever series was SHORTER visibly
+// stopped partway across the chart's x-range instead of reaching "now",
+// even though its underlying data was fully up to date. Real timestamps
+// make each point land at its own correct position regardless of how
+// many points either series has.
+
 function initBalanceChart() {
   const ctx = document.getElementById("balance-chart").getContext("2d");
   balanceChart = new Chart(ctx, {
     type: "line",
-    data: { labels: [], datasets: [
+    data: { datasets: [
       {
         label: "Balance ($)",
         data: [],
@@ -503,9 +518,9 @@ function initBalanceChart() {
     options: {
       animation: false,
       responsive: true,
-      interaction: { mode: "index", intersect: false },
+      interaction: { mode: "nearest", axis: "x", intersect: false },
       scales: {
-        x: { ticks: { color: "#7d8894", maxTicksLimit: 10 }, grid: { color: "#1a2129" } },
+        x: { type: "linear", ticks: { color: "#7d8894", maxTicksLimit: 10, callback: timeTickCallback }, grid: { color: "#1a2129" } },
         y: { ticks: { color: "#3fb950" }, grid: { color: "#1a2129" }, title: { display: true, text: "Balance ($)", color: "#3fb950" } },
       },
       plugins: { legend: { display: false } },
@@ -515,9 +530,7 @@ function initBalanceChart() {
 
 function renderBalanceChart(balanceSeries) {
   if (!balanceChart) return;
-  const series = balanceSeries || [];
-  balanceChart.data.labels = series.map((_, i) => i);
-  balanceChart.data.datasets[0].data = series.map(p => p.value);
+  balanceChart.data.datasets[0].data = (balanceSeries || []).map(p => ({ x: p.ts, y: p.value }));
   balanceChart.update();
 }
 
@@ -525,7 +538,7 @@ function initChart() {
   const ctx = document.getElementById("performance-chart").getContext("2d");
   chart = new Chart(ctx, {
     type: "line",
-    data: { labels: [], datasets: [
+    data: { datasets: [
       {
         label: "Cumulative Reward Score (proxy)",
         data: [],
@@ -548,9 +561,9 @@ function initChart() {
     options: {
       animation: false,
       responsive: true,
-      interaction: { mode: "index", intersect: false },
+      interaction: { mode: "nearest", axis: "x", intersect: false },
       scales: {
-        x: { ticks: { color: "#7d8894", maxTicksLimit: 10 }, grid: { color: "#1a2129" } },
+        x: { type: "linear", ticks: { color: "#7d8894", maxTicksLimit: 10, callback: timeTickCallback }, grid: { color: "#1a2129" } },
         y: { position: "left", ticks: { color: "#58a6ff" }, grid: { color: "#1a2129" }, title: { display: true, text: "Reward score (proxy)", color: "#58a6ff" } },
         y1: { position: "right", ticks: { color: "#f85149" }, grid: { display: false }, title: { display: true, text: "P&L ($)", color: "#f85149" } },
       },
@@ -563,10 +576,8 @@ function renderChart(history) {
   if (!chart) return;
   const rewardSeries = history.reward_score || [];
   const pnlSeries = history.pnl_dollars || [];
-  const longer = rewardSeries.length >= pnlSeries.length ? rewardSeries : pnlSeries;
-  chart.data.labels = longer.map((_, i) => i);
-  chart.data.datasets[0].data = rewardSeries.map(p => p.value);
-  chart.data.datasets[1].data = pnlSeries.map(p => p.value);
+  chart.data.datasets[0].data = rewardSeries.map(p => ({ x: p.ts, y: p.value }));
+  chart.data.datasets[1].data = pnlSeries.map(p => ({ x: p.ts, y: p.value }));
   chart.update();
 }
 

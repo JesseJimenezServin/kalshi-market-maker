@@ -183,15 +183,34 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
         """,
         (bucket, cutoff_ts),
     ).fetchall()
+    # pnl_rows has one row per (ticker, bucket) -- up to num_tickers rows
+    # landing in the SAME bucket. Emit exactly one COMBINED point per
+    # bucket (not one point per ticker-row), so pnl_dollars/balance_dollars
+    # have the same point density as reward_score above -- otherwise the
+    # two series end up with very different lengths and, plotted against
+    # a shared x-axis, one visibly stops well short of the other's actual
+    # end (CONFIRMED live 2026-09-02: reward_score had 169 points vs
+    # pnl_dollars' 363, so the reward line stopped roughly halfway across
+    # a chart whose x-axis was sized to the longer series).
     last_pnl_by_ticker: dict[str, float] = {}
     pnl_series = []
     balance_series = []
+    current_bucket = None
+    bucket_end_ts = None
     for r in pnl_rows:
+        row_bucket = int(r["ts"] // bucket)
+        if current_bucket is not None and row_bucket != current_bucket:
+            pnl_dollars = sum(last_pnl_by_ticker.values()) / 100.0
+            pnl_series.append({"ts": bucket_end_ts, "value": pnl_dollars})
+            balance_series.append({"ts": bucket_end_ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
+        current_bucket = row_bucket
+        bucket_end_ts = r["ts"]
         total_cents = (r["unrealized_pnl_cents"] or 0.0) + (r["realized_pnl_cents"] or 0.0)
         last_pnl_by_ticker[r["ticker"]] = total_cents
+    if current_bucket is not None:
         pnl_dollars = sum(last_pnl_by_ticker.values()) / 100.0
-        pnl_series.append({"ts": r["ts"], "value": pnl_dollars})
-        balance_series.append({"ts": r["ts"], "value": config.STARTING_CAPITAL_USD + pnl_dollars})
+        pnl_series.append({"ts": bucket_end_ts, "value": pnl_dollars})
+        balance_series.append({"ts": bucket_end_ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
 
     return {"reward_score": reward_series, "pnl_dollars": pnl_series, "balance_dollars": balance_series}
 
@@ -243,19 +262,35 @@ def _risk_reason(
     return f"{risk_level.capitalize()} due to: {', '.join(contributors)}"
 
 
-def _capital_allocation(conn: sqlite3.Connection, inventory: dict[str, sqlite3.Row]) -> list[dict]:
+# Comfortably larger than the ~1s scoring cadence across multiple
+# tickers, small enough to promptly drop a ticker market_switcher.py
+# just switched away from. CONFIRMED live 2026-09-02: a just-vacated
+# ticker's latest row was already 345s stale by the time it was queried
+# (vs. ~0.2s for genuinely active ones) -- without this cutoff, "latest
+# per ticker" means "latest EVER", so a switched-away ticker kept
+# showing up (with its last-known allocation) alongside the real
+# currently-watched ones indefinitely, e.g. a stale $562 entry
+# duplicating the live ticker it had been switched away FROM.
+RECENCY_CUTOFF_SEC = 20.0
+
+
+def _is_recent(row: sqlite3.Row | None, now: float) -> bool:
+    return row is not None and (now - row["ts"]) <= RECENCY_CUTOFF_SEC
+
+
+def _capital_allocation(conn: sqlite3.Connection, inventory: dict[str, sqlite3.Row], now: float) -> list[dict]:
     """
     "Where is the money currently allocated" breakdown, derived from each
-    currently-relevant ticker's latest inventory_marks.max_inventory (see
-    logger.py's SCHEMA) -- no separate table needed. A ticker that's been
-    switched away from ages out naturally once its max_inventory-bearing
-    rows fall out of `inventory` (server.py's normal latest-per-ticker
-    pattern), same as every other per-market dashboard field.
+    CURRENTLY-active ticker's latest inventory_marks.max_inventory (see
+    logger.py's SCHEMA) -- no separate table needed. Filtered to recent
+    rows only (see RECENCY_CUTOFF_SEC) so a ticker market_switcher.py
+    switched away from drops out promptly instead of lingering with a
+    stale allocation figure.
     """
     allocations = {
         ticker: row["max_inventory"]
         for ticker, row in inventory.items()
-        if row["max_inventory"] is not None
+        if row["max_inventory"] is not None and _is_recent(row, now)
     }
     total = sum(allocations.values())
     if total <= 0:
@@ -301,10 +336,18 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         flash_tickers = _recent_event_tickers(conn, since_ts) if since_ts is not None else set()
         metadata = _market_metadata(conn)
 
-        tickers = sorted(
-            set(scores) | set(inventory) | set(programs) | set(books) | set(quotes)
-            | set(config.WATCHED_MARKET_TICKERS)
-        )
+        # Only tickers actively ticking right now (see RECENCY_CUTOFF_SEC) --
+        # otherwise a ticker market_switcher.py switched away from (or an
+        # old manual-config ticker from a previous session) keeps showing
+        # up in the table indefinitely, since "latest per ticker" alone
+        # means "latest EVER", not "currently watched". Falls back to the
+        # static config list only if NOTHING is currently active (e.g.
+        # main.py isn't running yet), so the table still shows a helpful
+        # pre-data hint instead of a totally empty state.
+        now = time.time()
+        active_tickers = {t for t, r in inventory.items() if _is_recent(r, now)} | \
+            {t for t, r in quotes.items() if _is_recent(r, now)}
+        tickers = sorted(active_tickers) if active_tickers else sorted(set(config.WATCHED_MARKET_TICKERS))
 
         markets = []
         for ticker in tickers:
@@ -404,7 +447,7 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
             "recent_fills": _recent_fills(conn),
             "performance_history": _performance_history(conn),
             "starting_capital_usd": config.STARTING_CAPITAL_USD,
-            "capital_allocation": _capital_allocation(conn, inventory),
+            "capital_allocation": _capital_allocation(conn, inventory, now),
         }
     finally:
         conn.close()
