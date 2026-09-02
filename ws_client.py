@@ -142,17 +142,21 @@ class KalshiWebSocketClient:
         msg_type = msg.get("type")
 
         if msg_type in ("orderbook_snapshot", "orderbook_delta"):
-            self.orderbook_manager.handle_message(msg)
+            # handle_message tells us exactly which tickers need a fresh
+            # resync as a result of this message -- could be just the one
+            # tied to this message (unrecognized shape), or several at
+            # once (a sequence gap, since seq is shared across the whole
+            # subscription -- see orderbook.py's module docstring).
+            needs_resync_tickers = self.orderbook_manager.handle_message(msg)
 
-            body = msg.get("msg", {})
-            ticker = body.get("market_ticker")
+            if msg_type == "orderbook_snapshot":
+                ticker = msg.get("msg", {}).get("market_ticker")
+                if ticker:
+                    # A fresh snapshot answers any outstanding resync request.
+                    self._resync_pending.discard(ticker)
 
-            if msg_type == "orderbook_snapshot" and ticker:
-                # A fresh snapshot answers any outstanding resync request.
-                self._resync_pending.discard(ticker)
-
-            elif msg_type == "orderbook_delta" and ticker:
-                if self.orderbook_manager.needs_resync(ticker) and ticker not in self._resync_pending:
+            for ticker in needs_resync_tickers:
+                if ticker not in self._resync_pending:
                     await self._request_resync(ws, ticker)
 
         elif msg_type == "trade":

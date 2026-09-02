@@ -7,11 +7,20 @@ and "bid" (long yes) / "ask" (long no, expressed as a yes-price) sides are
 derived from that. We track raw levels as given by the API and expose
 convenience views on top.
 
-Each market has its own sequence number (`seq`) per subscription (`sid`).
-If we ever detect a gap in `seq`, we must NOT keep applying deltas -- the
-local book is now unreliable. We flag it as stale and request a fresh
-snapshot (via `get_snapshot` on the same channel, per Kalshi's April 2026
-addition) rather than silently trading on wrong data.
+`seq` is a SINGLE monotonic counter shared across the WHOLE subscription
+(`sid`), interleaved across every ticker subscribed under it -- CONFIRMED
+live 2026-09-01: with 4 tickers subscribed, their initial snapshots
+arrived at seq 1, 2, 3, 4 respectively, one each, not independent
+per-ticker sequences. Gap detection therefore happens once, globally, per
+sid (see OrderbookManager._last_seq_by_sid) -- NOT per ticker. Tracking it
+per-ticker (this module's original design) meant any OTHER ticker's
+activity would look like a sequence "gap" for a quiet ticker the moment
+it received its own next real update, causing spurious staleness/resync
+churn on every ticker whenever a busy one was interleaved with quiet
+ones. If we ever detect a real gap, we must NOT keep applying deltas --
+the local book(s) may now be unreliable. We flag them stale and request a
+fresh snapshot (via `get_snapshot` on the same channel, per Kalshi's
+April 2026 addition) rather than silently trading on wrong data.
 
 Price/size wire format (CONFIRMED live 2026-09-01 against a real
 orderbook_snapshot message -- Kalshi's API has since moved to this shape,
@@ -65,23 +74,13 @@ class MarketBook:
         self.last_update_ts = time.time()
         self.stale = False
 
-    def apply_delta(self, sid: int, seq: int, side: str, price: int, delta: float) -> bool:
+    def apply_delta(self, side: str, price: int, delta: float) -> None:
         """
-        Returns True if applied cleanly, False if a gap was detected
-        (caller should then request a fresh snapshot and mark stale).
+        Applies one price-level delta. Sequence/gap detection happens at
+        the OrderbookManager level (shared across the whole subscription),
+        not here -- by the time this is called, the caller has already
+        confirmed the global sequence is intact and this book isn't stale.
         """
-        if self.stale or self.sid != sid:
-            logger.warning("%s: dropping delta, book is stale or sid mismatch", self.ticker)
-            return False
-
-        if self.seq is not None and seq != self.seq + 1:
-            logger.error(
-                "%s: sequence gap detected (expected %s, got %s) -- marking book stale",
-                self.ticker, self.seq + 1 if self.seq is not None else None, seq,
-            )
-            self.stale = True
-            return False
-
         levels = self.yes_levels if side == "yes" else self.no_levels
         new_size = levels.get(price, 0) + delta
         if new_size <= 0:
@@ -89,9 +88,7 @@ class MarketBook:
         else:
             levels[price] = new_size
 
-        self.seq = seq
         self.last_update_ts = time.time()
-        return True
 
     # ----------------------------------------------------------------
     # Convenience views used by the reward simulator
@@ -123,36 +120,43 @@ class OrderbookManager:
 
     def __init__(self):
         self.books: dict[str, MarketBook] = {}
+        # seq is shared across the WHOLE subscription (per sid), not
+        # per-ticker -- see the module docstring. One running "last seen"
+        # value per sid, not per ticker.
+        self._last_seq_by_sid: dict[int, int] = {}
 
     def get_or_create(self, ticker: str) -> MarketBook:
         if ticker not in self.books:
             self.books[ticker] = MarketBook(ticker=ticker)
         return self.books[ticker]
 
-    def handle_message(self, msg: dict) -> None:
+    def handle_message(self, msg: dict) -> list[str]:
         """
-        Dispatch a raw WebSocket message. Real shape CONFIRMED live
-        2026-09-01 for orderbook_snapshot:
+        Dispatch a raw WebSocket message. Returns the list of tickers that
+        need a fresh resync snapshot as a result of processing this
+        message (empty if none) -- the caller (ws_client.py) is
+        responsible for actually requesting it.
+
+        Real shape CONFIRMED live 2026-09-01 for orderbook_snapshot:
           {"type": "orderbook_snapshot", "sid": ..., "seq": ...,
            "msg": {"market_ticker": ..., "yes_dollars_fp": [["0.0100","3095.00"], ...],
                    "no_dollars_fp": [...]}}
         Note sid/seq are TOP-LEVEL on the message, not nested in "msg".
 
         orderbook_delta's exact field names have NOT been confirmed against
-        a live message (thin/slow watched markets by design -- see
-        PROJECT_STATUS.md). The parsing below is a best-effort inference
-        from the confirmed "_dollars" (price) / "_fp" (size) convention
-        seen everywhere else in Kalshi's API. If a real delta doesn't
-        match, we log the full raw message once and mark the book stale
-        (triggering a resync) rather than crash the whole WebSocket
-        session -- check the logs and fix the field names here if that
-        happens.
+        a live message shape mismatch (only a sequencing bug was found so
+        far, live 2026-09-01 -- see PROJECT_STATUS.md). The parsing below
+        is a best-effort inference from the confirmed "_dollars" (price) /
+        "_fp" (size) convention seen everywhere else in Kalshi's API. If a
+        real delta doesn't match, we log the full raw message once and
+        mark that book stale (triggering a resync) rather than crash the
+        whole WebSocket session.
         """
         msg_type = msg.get("type")
         body = msg.get("msg", {})
         ticker = body.get("market_ticker")
         if not ticker:
-            return
+            return []
 
         book = self.get_or_create(ticker)
 
@@ -164,7 +168,13 @@ class OrderbookManager:
                 yes=_parse_dollar_fp_levels(body.get("yes_dollars_fp", [])),
                 no=_parse_dollar_fp_levels(body.get("no_dollars_fp", [])),
             )
+            # A snapshot is a fresh baseline for the WHOLE subscription's
+            # sequence counter (it consumes a seq slot too), not just this
+            # ticker -- confirmed live: 4 tickers' snapshots landed at
+            # seq 1,2,3,4 respectively.
+            self._last_seq_by_sid[sid] = seq
             logger.info("%s: applied snapshot (seq=%s)", ticker, seq)
+            return []
 
         elif msg_type == "orderbook_delta":
             try:
@@ -182,11 +192,34 @@ class OrderbookManager:
                     ticker, msg,
                 )
                 book.stale = True
-                return
+                return [ticker]
 
-            ok = book.apply_delta(sid=sid, seq=seq, side=side, price=price, delta=delta)
-            if not ok:
-                logger.warning("%s: needs resync", ticker)
+            expected = self._last_seq_by_sid.get(sid)
+            self._last_seq_by_sid[sid] = seq
+
+            if expected is not None and seq != expected + 1:
+                # A gap ANYWHERE in this shared stream means we can't
+                # trust any book under this sid until each is resynced --
+                # we don't know which ticker(s) the lost message(s)
+                # actually belonged to, so treat all of them as suspect.
+                affected = list(self.books.keys())
+                for t in affected:
+                    self.books[t].stale = True
+                logger.error(
+                    "sid=%s: sequence gap detected (expected %s, got %s) -- "
+                    "marking all %d tracked book(s) stale for resync",
+                    sid, expected + 1, seq, len(affected),
+                )
+                return affected
+
+            if book.stale:
+                logger.warning("%s: dropping delta, book is stale (awaiting resync)", ticker)
+                return []
+
+            book.apply_delta(side=side, price=price, delta=delta)
+            return []
+
+        return []
 
     def needs_resync(self, ticker: str) -> bool:
         book = self.books.get(ticker)

@@ -86,6 +86,49 @@ def test_orderbook_delta_unrecognized_shape_marks_stale_not_crash():
     print("test_orderbook_delta_unrecognized_shape_marks_stale_not_crash: PASS")
 
 
+def test_orderbook_seq_is_shared_across_tickers_under_one_sid():
+    """
+    Regression test for a real bug found live 2026-09-01: `seq` is a
+    single counter shared across the WHOLE subscription (sid), not
+    independent per ticker. A quiet ticker interleaved with a busy one
+    must NOT be spuriously marked stale just because the busy ticker
+    consumed several seq numbers in between the quiet ticker's updates.
+    """
+    mgr = OrderbookManager()
+    mgr.handle_message({
+        "type": "orderbook_snapshot", "sid": 1, "seq": 1,
+        "msg": {"market_ticker": "QUIET", "yes_dollars_fp": [["0.5000", "100.00"]], "no_dollars_fp": [["0.4800", "100.00"]]},
+    })
+    mgr.handle_message({
+        "type": "orderbook_snapshot", "sid": 1, "seq": 2,
+        "msg": {"market_ticker": "BUSY", "yes_dollars_fp": [["0.5000", "100.00"]], "no_dollars_fp": [["0.4800", "100.00"]]},
+    })
+    quiet_book = mgr.books["QUIET"]
+    busy_book = mgr.books["BUSY"]
+    assert not quiet_book.stale and not busy_book.stale
+
+    # BUSY receives several real deltas, consuming seq 3, 4, 5.
+    for seq in (3, 4, 5):
+        mgr.handle_message({
+            "type": "orderbook_delta", "sid": 1, "seq": seq,
+            "msg": {"market_ticker": "BUSY", "side": "yes", "price_dollars": "0.5000", "delta_fp": "1.00"},
+        })
+    assert not busy_book.stale
+    assert not quiet_book.stale, "QUIET should be unaffected by BUSY's activity"
+
+    # QUIET's own next delta correctly continues the SHARED counter at 6
+    # -- under the old (buggy) per-ticker tracking this would have looked
+    # like a huge gap (QUIET's own last seq was 1) and wrongly marked it
+    # stale.
+    mgr.handle_message({
+        "type": "orderbook_delta", "sid": 1, "seq": 6,
+        "msg": {"market_ticker": "QUIET", "side": "yes", "price_dollars": "0.5000", "delta_fp": "5.00"},
+    })
+    assert not quiet_book.stale, "a valid shared-sequence delta must not be treated as a gap"
+    assert quiet_book.yes_levels[50] == 105.0
+    print("test_orderbook_seq_is_shared_across_tickers_under_one_sid: PASS")
+
+
 def test_reference_price():
     # Target size 100 -> threshold is 20 (1/5 of target).
     levels_desc = [(50, 10), (49, 15), (48, 5)]  # cumulative: 10, 25, 30
@@ -347,6 +390,7 @@ def test_risk_engine_news_signal_escalates_then_decays():
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_orderbook_delta_unrecognized_shape_marks_stale_not_crash()
+    test_orderbook_seq_is_shared_across_tickers_under_one_sid()
     test_reference_price()
     test_score_hypothetical_order_qualifies_and_shares_correctly()
     test_score_hypothetical_order_fails_target()
