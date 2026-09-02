@@ -38,12 +38,20 @@ from fastapi.templating import Jinja2Templates
 
 import config
 from logger import SimulationLogger
+from singleton_lock import acquire_singleton_lock
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("server")
+
+# Structural protection against running two instances at once (see
+# singleton_lock.py). The OS port bind already prevents true duplicates
+# here, but this gives a clear error message instead of a raw
+# "address already in use" and keeps the same protection pattern as
+# main.py, where nothing else prevented the 2026-09-01 incident.
+acquire_singleton_lock("server", config.BASE_DIR)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))

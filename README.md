@@ -72,8 +72,16 @@ Edit `config.py` and add the tickers you picked to `WATCHED_MARKET_TICKERS`.
 ## Step 3 — run the paper-trading pipeline
 
 ```bash
-python3 main.py
+./manage.sh start main
 ```
+
+Use `./manage.sh` (start/stop/restart/status) instead of running
+`python3 main.py` directly and managing it by hand -- it uses a PID file
+so restarts always target the exact right process. (main.py also refuses
+to start a second instance of itself no matter how it's launched -- see
+`singleton_lock.py` and the 2026-09-01 incident in `PROJECT_STATUS.md`:
+running multiple copies by accident corrupted a data-collection window by
+writing to the same SQLite file from several unaware processes at once.)
 
 This will:
 - Stream the live order book and trade tape for your watched markets.
@@ -92,8 +100,11 @@ at least one volatility event) to be meaningful.
 ## Step 4 — watch it live in the dashboard
 
 ```bash
-python3 server.py
+./manage.sh start server
 ```
+
+(Or `./manage.sh start both` to start main.py + server.py together, and
+`./manage.sh status` any time to check what's currently running.)
 
 Then open http://127.0.0.1:8000/ in a browser. This is a read-only FastAPI
 server that streams live updates from `data/paper_trading.sqlite` over a

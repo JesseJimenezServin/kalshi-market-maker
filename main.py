@@ -48,6 +48,7 @@ from logger import SimulationLogger
 import quoting_policy
 from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
+from singleton_lock import acquire_singleton_lock
 
 logger = logging.getLogger("main")
 
@@ -305,6 +306,11 @@ def make_trade_handler(
 
 
 async def run() -> None:
+    # Structural protection against ever again running two instances at
+    # once (see singleton_lock.py for why this exists) -- checked first,
+    # before any network calls, so a duplicate instance fails fast.
+    acquire_singleton_lock("main", config.BASE_DIR)
+
     if not config.WATCHED_MARKET_TICKERS:
         logger.error(
             "config.WATCHED_MARKET_TICKERS is empty. Run incentive_screener.py first, "

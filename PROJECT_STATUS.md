@@ -51,6 +51,10 @@ sustained data-collection window.
   (snapshot_scores joined against incentive_program_snapshots) printed
   alongside real adverse-selection P&L from inventory_marks. No simulated
   cash balance -- P&L is already tracked correctly in cents.
+- singleton_lock.py -- structural protection so only one instance of
+  main.py or server.py can ever run at once (see Decisions log 2026-09-01)
+- manage.sh -- start/stop/restart/status for main.py + server.py via
+  PID files -- use this instead of hand-typed nohup/pkill commands
 - test_logic.py -- offline unit tests, no network required, 14/14 passing
 
 ## Completed milestones
@@ -185,6 +189,27 @@ sustained data-collection window.
   funds, not reflective of real markets). Phase 0 now reads production
   market data (read-only, unfunded account) instead. Added explicit
   GET-only guard in rest_client.py as a safety measure ahead of Phase 1.
+- 2026-09-01 INCIDENT: main.py was "restarted" repeatedly across a work
+  session using `nohup ... &` plus a hand-typed `pkill -f "python3 main.py"`
+  that never actually matched the real process command line (the
+  interpreter shows up as `Python`, not `python3`, once launched). Every
+  restart silently left the old process running and started a new one
+  alongside it -- by the time this was caught, 9 duplicate main.py
+  processes had been running simultaneously for hours, all independently
+  connected to Kalshi and all writing to the same SQLite file. This
+  corrupted inventory_marks/simulated_fills/simulated_stop_losses for that
+  entire window (multiple unaware simulations' rows interleaved, producing
+  impossible-looking "flapping" position/P&L numbers on the dashboard).
+  Response: backed up the contaminated DB (data/paper_trading_contaminated_
+  backup_20260901_201057.sqlite), purged and vacuumed the live DB, killed
+  all 9 duplicates, and added structural prevention: singleton_lock.py
+  (main.py/server.py now refuse to start a second instance, checked
+  before any network call -- verified by running `python3 main.py`
+  directly while another instance was live; it exited immediately with a
+  clear error) and manage.sh (start/stop/restart/status via PID files
+  instead of guessed pkill patterns). Data collected before ~20:04 on
+  2026-09-01 should be treated as unreliable for anything inventory/P&L
+  related.
 
 ## Next steps (in order)
 1. Pick 2-4 active, low-volatility incentivized markets via

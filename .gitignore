@@ -5,3 +5,5 @@ venv/
 data/*.sqlite
 logs/
 __pycache__/
+*.pid
+*.out.log
