@@ -17,7 +17,8 @@ from news_feed import score_relevance
 from market_switcher import MarketSwitcher, compute_crowding_ratio
 from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
-from main import _select_initial_watchlist
+from main import _select_initial_watchlist, MarketRuntimeState
+from capital_allocator import allocate_capital
 import config
 
 
@@ -663,6 +664,93 @@ def test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist(
     print("test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist: PASS")
 
 
+def _screened(ticker, reward_density_score, adjusted_score=None):
+    now = datetime.now(timezone.utc)
+    return ScreenedProgram(
+        market_ticker=ticker,
+        period_reward=0.0,
+        target_size=100.0,
+        discount_factor_bps=9000,
+        start_date=now,
+        end_date=now + timedelta(days=10),
+        days_remaining=10.0,
+        reward_density_score=reward_density_score,
+        raw={},
+        adjusted_score=adjusted_score,
+    )
+
+
+def test_allocate_capital_weights_by_profit_risk_ratio():
+    # No clipping (min=0, max=1) -> allocation should purely follow the
+    # adjusted_score (profit/risk) ratio: 3:1 -> 75%/25%.
+    programs = [_screened("A", reward_density_score=1.0, adjusted_score=3.0),
+                _screened("B", reward_density_score=1.0, adjusted_score=1.0)]
+    allocations = allocate_capital(1000.0, programs, min_fraction=0.0, max_fraction=1.0)
+    assert allocations["A"] > allocations["B"]
+    assert abs(allocations["A"] - 750) <= 1, allocations
+    assert abs(allocations["B"] - 250) <= 1, allocations
+    print("test_allocate_capital_weights_by_profit_risk_ratio: PASS")
+
+
+def test_allocate_capital_falls_back_to_reward_density_when_adjusted_score_missing():
+    # A's adjusted_score is None (e.g. manual-fallback watch list, which
+    # skips the crowding-aware live check) -> must fall back to
+    # reward_density_score, not be treated as zero/unweighted.
+    programs = [_screened("A", reward_density_score=3.0, adjusted_score=None),
+                _screened("B", reward_density_score=1.0, adjusted_score=1.0)]
+    allocations = allocate_capital(1000.0, programs, min_fraction=0.0, max_fraction=1.0)
+    assert allocations["A"] > allocations["B"], allocations
+    print("test_allocate_capital_falls_back_to_reward_density_when_adjusted_score_missing: PASS")
+
+
+def test_allocate_capital_clips_to_min_and_max_fraction():
+    # Heavily skewed weights (100:1:1) -- without clipping, A would get
+    # ~98% and starve B/C almost entirely (down to ~1% each). A gets
+    # capped at max_fraction=0.60; the remaining 0.40 budget splits
+    # evenly across B/C's equal weights (0.20 each), which already
+    # clears min_fraction=0.15 on its own -- no further clipping needed.
+    programs = [_screened("A", reward_density_score=1.0, adjusted_score=100.0),
+                _screened("B", reward_density_score=1.0, adjusted_score=1.0),
+                _screened("C", reward_density_score=1.0, adjusted_score=1.0)]
+    allocations = allocate_capital(1000.0, programs, min_fraction=0.15, max_fraction=0.60)
+
+    assert allocations == {"A": 600, "B": 200, "C": 200}, allocations
+    for ticker in ("A", "B", "C"):
+        fraction = allocations[ticker] / 1000.0
+        assert 0.15 - 1e-6 <= fraction <= 0.60 + 1e-6, (ticker, fraction, allocations)
+    print("test_allocate_capital_clips_to_min_and_max_fraction: PASS")
+
+
+def test_allocate_capital_min_floor_holds_even_when_max_cap_binds_elsewhere():
+    # A dominant ticker capped at max_fraction, PLUS one genuinely
+    # under-weighted ticker that needs the min_fraction floor even after
+    # the dominant one is capped -- exercises both bounds actually
+    # binding in the same allocation, not just one at a time.
+    programs = [_screened("A", reward_density_score=1.0, adjusted_score=1000.0),
+                _screened("B", reward_density_score=1.0, adjusted_score=10.0),
+                _screened("C", reward_density_score=1.0, adjusted_score=0.001)]
+    allocations = allocate_capital(1000.0, programs, min_fraction=0.15, max_fraction=0.60)
+
+    assert allocations["A"] == 600, allocations
+    assert allocations["C"] == 150, allocations  # floored
+    assert allocations["B"] == 250, allocations  # takes the rest: 1000 - 600 - 150
+    print("test_allocate_capital_min_floor_holds_even_when_max_cap_binds_elsewhere: PASS")
+
+
+def test_allocate_capital_empty_returns_empty_dict():
+    assert allocate_capital(1000.0, [], min_fraction=0.15, max_fraction=0.60) == {}
+    print("test_allocate_capital_empty_returns_empty_dict: PASS")
+
+
+def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
+    default_state = MarketRuntimeState("TEST", target_size=100.0, discount_factor=0.9)
+    assert default_state.max_inventory == config.MAX_SIMULATED_INVENTORY
+
+    overridden = MarketRuntimeState("TEST", target_size=100.0, discount_factor=0.9, max_inventory=250)
+    assert overridden.max_inventory == 250
+    print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
+
+
 def test_market_switcher_backs_off_after_failed_search_not_just_successful_switch():
     """
     Regression test for a live incident (2026-09-02): both watched
@@ -720,4 +808,10 @@ if __name__ == "__main__":
     test_select_watchlist_picks_best_available_even_when_all_crowded()
     test_select_watchlist_returns_fewer_than_requested_if_not_enough_programs_exist()
     test_select_initial_watchlist_falls_back_only_when_no_active_programs_exist()
+    test_allocate_capital_weights_by_profit_risk_ratio()
+    test_allocate_capital_falls_back_to_reward_density_when_adjusted_score_missing()
+    test_allocate_capital_clips_to_min_and_max_fraction()
+    test_allocate_capital_min_floor_holds_even_when_max_cap_binds_elsewhere()
+    test_allocate_capital_empty_returns_empty_dict()
+    test_market_runtime_state_defaults_max_inventory_and_accepts_override()
     print("\nALL TESTS PASSED")

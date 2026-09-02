@@ -89,7 +89,15 @@ class KalshiRestClient:
         return self._get(f"/markets/{ticker}/orderbook", params=params)
 
     def get_trades(self, ticker: str, limit: int = 100, **params) -> dict:
-        return self._get(f"/markets/{ticker}/trades", params={"limit": limit, **params})
+        # CONFIRMED live 2026-09-02: trades are a top-level /markets/trades
+        # list endpoint filtered by a `ticker` query param, NOT a
+        # /markets/{ticker}/trades path (the latter 404s on every ticker --
+        # this was a pre-existing bug, never exercised live until
+        # incentive_screener.py's volatility estimator called it this
+        # session). Real trade record shape confirmed at the same time:
+        # {"cursor": ..., "trades": [{"yes_price_dollars": "0.4300",
+        # "count_fp": "53.95", "taker_side": "no", ...}, ...]}.
+        return self._get("/markets/trades", params={"ticker": ticker, "limit": limit, **params})
 
     # ------------------------------------------------------------------
     # Incentive programs (the whole point of this project)

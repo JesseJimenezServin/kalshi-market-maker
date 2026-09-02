@@ -116,20 +116,39 @@ INCENTIVE_POLL_INTERVAL_SEC = 300  # 5 minutes
 DEFAULT_SIMULATED_QUOTE_SIZE = 100  # contracts, per side
 
 # --------------------------------------------------------------------------
+# Capital allocation across the current watch list (profit/risk-weighted)
+# --------------------------------------------------------------------------
+# The pretend total starting balance main.py allocates across whichever
+# markets it's currently watching (see capital_allocator.allocate_capital,
+# wired into main.py's run()). Allocation is weighted by each market's
+# profit/risk ratio (incentive_screener's adjusted_score -- reward density
+# dampened by real crowding and recent volatility), not split evenly --
+# a market with a better profit/risk ratio gets more of the balance, one
+# with a worse ratio gets less, everyone gets at least MIN_ALLOCATION_FRACTION.
+STARTING_CAPITAL_USD = 1000.0
+
+# Bounds on each market's share of STARTING_CAPITAL_USD, as a fraction of
+# the total -- prevents any one market from being fully starved or fully
+# concentrated. Chosen for a small watch list (config.NUM_MARKETS_TO_WATCH);
+# see capital_allocator.allocate_capital's docstring for why this floor is
+# a soft preference, not a hard guarantee, if the watch list ever grows large.
+MIN_ALLOCATION_FRACTION = 0.15
+MAX_ALLOCATION_FRACTION = 0.60
+
+# --------------------------------------------------------------------------
 # Risk / adverse-selection simulation parameters
 # --------------------------------------------------------------------------
-# When simulating "what if I had a resting order here", this is the max
-# hypothetical inventory (in contracts) we allow the simulator to accumulate
-# per market before it assumes we'd have pulled quotes. This should match
-# whatever position limit you'd actually run live in Phase 1.
-#
-# Set 2026-09-01 to represent a ~$1000 pretend bankroll spread across the 3
-# watched markets (333/market). This is a rough, CONSERVATIVE proxy, not an
+# Fallback max hypothetical inventory (in contracts) for a market that,
+# for whatever reason, didn't get a per-market allocation from
+# capital_allocator.allocate_capital above (MarketRuntimeState's default,
+# also used defensively in main.py if a ticker is somehow missing from
+# the allocation result). This is a rough, CONSERVATIVE proxy, not an
 # exact dollar figure: contracts are priced 1-99 cents and a single
 # contract's max payout/loss is $1, so "contract count" only equals actual
 # dollars at risk in the worst case where every contract simultaneously
 # moves against us at $1 -- real dollar exposure at any given moment is
-# typically much less than contract_count * $1.
+# typically much less than contract_count * $1. Same approximation the
+# real per-market allocations above use, just as a single flat number.
 MAX_SIMULATED_INVENTORY = 333
 
 # --------------------------------------------------------------------------

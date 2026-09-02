@@ -41,6 +41,13 @@ sustained data-collection window.
   Price (not just the touch) before applying inventory skew, widen/pull
   on risk escalation, simulated hard-stop flatten (crosses the spread via
   adverse_selection_sim.InventoryState, still no real orders)
+- capital_allocator.py -- splits config.STARTING_CAPITAL_USD across the
+  currently-watched markets, weighted by profit/risk (reusing
+  incentive_screener's adjusted_score), bounded to [MIN_ALLOCATION_FRACTION,
+  MAX_ALLOCATION_FRACTION] per market via a proper bounded-proportional
+  ("waterfilling") split. Sets each MarketRuntimeState.max_inventory --
+  the existing hard position-size cap -- instead of the single flat
+  config.MAX_SIMULATED_INVENTORY constant it replaces.
 - market_switcher.py -- event-triggered market switcher: pure building
   blocks (crowding ratio, sustain+cooldown trigger logic, candidate
   search) -- NOT a continuous re-optimizer, opt-in via
@@ -72,7 +79,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 27/27 passing
+- test_logic.py -- offline unit tests, no network required, 33/33 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -305,13 +312,15 @@ sustained data-collection window.
   which reflects stop-loss impact automatically.
 - Both previously-planned workstreams (scheduled-event calendar
   awareness, crowding-aware market selection) are now built -- see the
-  2026-09-02 milestone entries above. The crowding-aware volatility
-  estimator's "trades" response-wrapper key (incentive_screener.py's
-  _estimate_recent_volatility) hasn't itself been exercised live, though
-  the per-trade field names it reads already have been (see that
-  function's docstring) -- worth a quick manual check the first time
-  `python3 incentive_screener.py` is run on a machine that can reach
-  Kalshi.
+  2026-09-02 milestone entries above. Their live run surfaced a real,
+  pre-existing bug: rest_client.get_trades was hitting a nonexistent
+  /markets/{ticker}/trades path (404 on every one of ~15 tickers
+  checked, confirmed via curl against the real endpoint before fixing)
+  instead of the real /markets/trades?ticker=... list endpoint. Fixed
+  same day. This method predates this session and was apparently never
+  exercised live before incentive_screener.py's volatility estimator
+  called it -- main.py's own trade handling uses the WebSocket trade
+  channel, not this REST method, so nothing else was affected.
 - Dashboard's "Cumulative Reward Score" chart series is a unitless proxy
   (running sum of combined_score), not a dollar figure -- Kalshi's real
   USD payout pools every participant's score over the full period, which
@@ -419,6 +428,40 @@ reward-density candidates checked).
   anywhere. Together with the 2026-09-02 market-switcher fix above, the
   pipeline now both picks its own markets at startup and can switch away
   mid-run without any manual intervention.
+
+- 2026-09-02 (completed): Profit/risk-weighted capital allocation
+  (capital_allocator.py). Per explicit request: when this leaves Phase 0
+  it will get a fixed starting balance to allocate across its selected
+  markets, so that allocation needed to be real now, in simulation, not
+  deferred. config.STARTING_CAPITAL_USD (default $1000) is split across
+  whichever markets main.py is currently watching, weighted by each
+  one's profit/risk ratio -- reusing incentive_screener's adjusted_score
+  (reward density dampened by real crowding and recent volatility)
+  rather than inventing a second metric, since that ratio already IS
+  "potential profit / risk". Bounded to [MIN_ALLOCATION_FRACTION,
+  MAX_ALLOCATION_FRACTION] (0.15/0.60 default) per market via a proper
+  bounded-proportional ("waterfilling") split -- caught and fixed a real
+  bug in an earlier single-pass clip-then-rescale draft during testing:
+  rescaling to sum to 1.0 after clipping could push a value back OUTSIDE
+  the bound it was just clipped to (e.g. a market capped at 60% ending
+  up at 66.7% after the rescale). The waterfilling version locks
+  violators one at a time and only re-splits the REMAINING budget across
+  still-unlocked markets, so both bounds now actually hold.
+  MarketRuntimeState gained a per-market max_inventory field (replacing
+  the single flat config.MAX_SIMULATED_INVENTORY used everywhere before,
+  which is now only a fallback default); all 5 call sites in main.py
+  that read it now read state.max_inventory instead. A market switched
+  into mid-run inherits the vacated market's allocation directly rather
+  than triggering a full portfolio rebalance -- a switch is scoped to
+  the one market that triggered it. 6 new tests (profit/risk weighting,
+  missing-adjusted_score fallback, both bounds binding together, the
+  infeasible-bounds fallback, empty input, MarketRuntimeState's default/
+  override); 33/33 passing. Re-verified via grep that no order-placing
+  code exists anywhere. Quote SIZE (config.DEFAULT_SIMULATED_QUOTE_SIZE)
+  is still a flat constant, unaffected by this -- only how big a
+  position is ALLOWED to grow before quotes pull/flatten is now
+  allocation-aware, not the resting order size itself; worth revisiting
+  if a market's allocation ever ends up smaller than the quote size.
 
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks

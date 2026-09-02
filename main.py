@@ -42,6 +42,7 @@ from rest_client import KalshiRestClient
 from orderbook import OrderbookManager, dollars_to_cents, fp_to_size
 from ws_client import KalshiWebSocketClient
 from incentive_screener import ScreenedProgram, screen_incentive_programs, select_watchlist, print_report
+from capital_allocator import allocate_capital
 from reward_simulator import score_both_sides
 from adverse_selection_sim import HypotheticalQuote, InventoryState, process_trade_for_inventory
 from logger import SimulationLogger
@@ -58,10 +59,24 @@ logger = logging.getLogger("main")
 class MarketRuntimeState:
     """Per-market hypothetical quote + inventory + program parameters."""
 
-    def __init__(self, ticker: str, target_size: float, discount_factor: float):
+    def __init__(
+        self,
+        ticker: str,
+        target_size: float,
+        discount_factor: float,
+        max_inventory: int | None = None,
+    ):
         self.ticker = ticker
         self.target_size = target_size
         self.discount_factor = discount_factor
+        # Per-market position cap. Defaults to the flat fallback constant;
+        # run() overwrites this for every state right after construction
+        # via capital_allocator.allocate_capital's profit/risk-weighted
+        # split of config.STARTING_CAPITAL_USD. A market switched into
+        # mid-run (see main.py's market_switch_loop) instead inherits the
+        # vacated market's allocation directly, rather than triggering a
+        # full re-split across everyone else.
+        self.max_inventory = max_inventory if max_inventory is not None else config.MAX_SIMULATED_INVENTORY
         self.inventory = InventoryState(ticker=ticker)
         self.risk_engine = RiskEngine(ticker=ticker)
         self.quote: HypotheticalQuote | None = None  # set once we have book data
@@ -154,14 +169,14 @@ async def scoring_loop(
                 continue
             mid = (best_yes[0] + (100 - best_no[0])) / 2.0
 
-            state.risk_engine.update(mid, state.inventory, config.MAX_SIMULATED_INVENTORY)
+            state.risk_engine.update(mid, state.inventory, state.max_inventory)
 
             state.quote = quoting_policy.compute_quote(
                 book,
                 state.risk_engine.risk_level,
                 state.inventory,
                 config.DEFAULT_SIMULATED_QUOTE_SIZE,
-                config.MAX_SIMULATED_INVENTORY,
+                state.max_inventory,
                 state.target_size,
             )
 
@@ -182,7 +197,7 @@ async def scoring_loop(
                 book,
                 state.inventory,
                 state.risk_engine.risk_level,
-                config.MAX_SIMULATED_INVENTORY,
+                state.max_inventory,
                 config.HARD_STOP_INVENTORY_FRACTION,
             )
             if fill is not None:
@@ -322,7 +337,7 @@ async def market_switch_loop(
                 continue
 
             fill = quoting_policy.flatten_position(
-                book, state.inventory, config.MAX_SIMULATED_INVENTORY, reason=f"market_switch_{trigger}",
+                book, state.inventory, state.max_inventory, reason=f"market_switch_{trigger}",
             )
             if fill is not None:
                 sim_logger.log_simulated_stop_loss(ticker=ticker, **fill)
@@ -348,6 +363,11 @@ async def market_switch_loop(
                 replacement.market_ticker,
                 target_size=replacement.target_size,
                 discount_factor=replacement.discount_factor_bps / 10000.0,
+                # Carry the vacated market's capital allocation forward
+                # unchanged rather than re-splitting across everyone else --
+                # a switch is scoped to the one market that triggered it,
+                # not a full portfolio rebalance (see capital_allocator.py).
+                max_inventory=state.max_inventory,
             )
 
             sim_logger.log_market_switch(
@@ -404,7 +424,7 @@ def make_trade_handler(
             trade_count=trade_count,
             taker_side=taker_side,
             my_share_at_price=my_share_estimate,
-            max_inventory=config.MAX_SIMULATED_INVENTORY,
+            max_inventory=state.max_inventory,
         )
         sim_logger.log_simulated_fill(
             ticker=ticker,
@@ -480,6 +500,21 @@ async def run() -> None:
     # (only possible via the manual fallback list) are logged and
     # skipped, since there's no live program to simulate scoring against.
     states = build_market_states(watched_tickers, screened)
+
+    # Split the pretend starting balance across whatever we're actually
+    # watching (states.keys(), not the full `screened` list, which for
+    # the manual-fallback path can include unwatched programs too),
+    # weighted by profit/risk -- see capital_allocator.py.
+    relevant_programs = [p for p in screened if p.market_ticker in states]
+    allocations = allocate_capital(
+        config.STARTING_CAPITAL_USD, relevant_programs, config.MIN_ALLOCATION_FRACTION, config.MAX_ALLOCATION_FRACTION
+    )
+    for ticker, state in states.items():
+        state.max_inventory = allocations.get(ticker, config.MAX_SIMULATED_INVENTORY)
+    logger.info(
+        "Starting balance $%.0f allocated across %d market(s): %s",
+        config.STARTING_CAPITAL_USD, len(states), {t: s.max_inventory for t, s in states.items()},
+    )
 
     ws_client = KalshiWebSocketClient(
         tickers=watched_tickers,

@@ -103,8 +103,11 @@ This will:
   snapshot score (assuming you're resting `DEFAULT_SIMULATED_QUOTE_SIZE`
   contracts at the best bid on each side — see `config.py`).
 - On every real trade print, update a simulated inventory position and
-  P&L, respecting `MAX_SIMULATED_INVENTORY` as a hard cap (mimicking a
-  policy of pulling quotes once you hit a position limit).
+  P&L, respecting each market's `max_inventory` as a hard cap (mimicking
+  a policy of pulling quotes once you hit a position limit). Each
+  watched market's cap comes from splitting `config.STARTING_CAPITAL_USD`
+  across the current watch list by profit/risk (see `capital_allocator.py`),
+  not one flat number per market.
 - Log everything to `data/paper_trading.sqlite`.
 
 Let it run for a while — ideally the full 1–2 week window we discussed —
@@ -213,6 +216,7 @@ forecast) while we tighten the model with real observed data.
 | `adverse_selection_sim.py` | Hypothetical inventory + P&L from trade flow |
 | `logger.py` | SQLite persistence |
 | `event_calendar.py` | Feeds real close/resolution-time proximity into `risk_engine.py` |
+| `capital_allocator.py` | Splits the starting balance across watched markets by profit/risk |
 | `main.py` | Orchestrates everything |
 | `server.py` | Read-only FastAPI dashboard, streams `data/paper_trading.sqlite` over `/ws` |
 | `templates/dashboard.html` | Dashboard single-page UI (markets, depth, fills, chart) |

@@ -108,12 +108,13 @@ def _estimate_recent_volatility(client: KalshiRestClient, ticker: str, lookback_
     get without ever having watched the market. None on any failure, or
     if fewer than 2 trades are returned (can't estimate a spread).
 
-    Per-trade field names ("yes_price_dollars"/"count_fp") are already
-    CONFIRMED live via a real REST /markets/trades response (see main.py's
-    trade handler, 2026-08-31/09-01) -- but the top-level "trades"
-    response-wrapper key below follows Kalshi's documented schema and has
-    not itself been separately exercised live. Verify on your own machine
-    before trusting this signal.
+    CONFIRMED live 2026-09-02, both the top-level "trades" response-
+    wrapper key and the per-trade field names ("yes_price_dollars"/
+    "count_fp") -- this call also caught and fixed a real bug in
+    rest_client.get_trades itself: it had been hitting a nonexistent
+    /markets/{ticker}/trades path (404 on every ticker checked) instead
+    of the real /markets/trades?ticker=... list endpoint. See
+    rest_client.py's get_trades for the fix.
     """
     try:
         raw = client.get_trades(ticker, limit=lookback_trades)
