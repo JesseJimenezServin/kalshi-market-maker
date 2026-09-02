@@ -61,6 +61,7 @@ class KalshiWebSocketClient:
         self._cmd_id = 0
         self._ws = None
         self._orderbook_delta_sid: int | None = None
+        self._trade_sid: int | None = None
         # Tickers with a resync already requested but not yet answered by a
         # fresh snapshot -- avoids firing a new get_snapshot request on
         # every single delta that arrives while still stale (confirmed live
@@ -117,6 +118,58 @@ class KalshiWebSocketClient:
         self._resync_pending.add(ticker)
         logger.info("%s: requested resync snapshot", ticker)
 
+    def _known_sids(self) -> list[int]:
+        return [sid for sid in (self._orderbook_delta_sid, self._trade_sid) if sid is not None]
+
+    async def add_ticker(self, ticker: str) -> bool:
+        """
+        Adds a ticker to the live subscription (both channels) without
+        dropping the connection. CONFIRMED live 2026-09-02 against a
+        standalone throwaway connection: Kalshi's update_subscription
+        supports action="add_markets" for this, returning a "type": "ok"
+        confirmation. Returns False (no-op) if not currently connected or
+        the sids aren't known yet -- caller should retry once connected.
+        """
+        if ticker in self.tickers:
+            return True
+        if self._ws is None or not self._known_sids():
+            logger.warning("%s: can't add ticker yet, not connected or no sid known", ticker)
+            return False
+
+        for sid in self._known_sids():
+            await self._ws.send(json.dumps({
+                "id": self._next_id(),
+                "cmd": "update_subscription",
+                "params": {"sid": sid, "market_tickers": [ticker], "action": "add_markets"},
+            }))
+        self.tickers.append(ticker)
+        logger.info("%s: added to live subscription", ticker)
+        return True
+
+    async def remove_ticker(self, ticker: str) -> bool:
+        """
+        Removes a ticker from the live subscription (both channels) and
+        drops its local order book state. CONFIRMED live 2026-09-02:
+        action="delete_markets". Returns False if not currently connected.
+        """
+        if ticker not in self.tickers:
+            return True
+        if self._ws is None or not self._known_sids():
+            logger.warning("%s: can't remove ticker yet, not connected or no sid known", ticker)
+            return False
+
+        for sid in self._known_sids():
+            await self._ws.send(json.dumps({
+                "id": self._next_id(),
+                "cmd": "update_subscription",
+                "params": {"sid": sid, "market_tickers": [ticker], "action": "delete_markets"},
+            }))
+        self.tickers.remove(ticker)
+        self.orderbook_manager.remove(ticker)
+        self._resync_pending.discard(ticker)
+        logger.info("%s: removed from live subscription", ticker)
+        return True
+
     async def run_forever(self) -> None:
         backoff = 1.0
         while True:
@@ -129,6 +182,13 @@ class KalshiWebSocketClient:
                 backoff = min(backoff * 2, 60)
 
     async def _run_once(self) -> None:
+        # Fresh connection = fresh sids; stale ones from a prior dropped
+        # connection would make add_ticker/remove_ticker target a
+        # subscription that no longer exists.
+        self._orderbook_delta_sid = None
+        self._trade_sid = None
+        self._resync_pending.clear()
+
         headers = self._auth_headers()
         async with websockets.connect(self.ws_url, additional_headers=headers, ssl=_SSL_CONTEXT) as ws:
             self._ws = ws
@@ -172,6 +232,8 @@ class KalshiWebSocketClient:
             sid = msg.get("msg", {}).get("sid")
             if channel == "orderbook_delta" and sid is not None:
                 self._orderbook_delta_sid = sid
+            elif channel == "trade" and sid is not None:
+                self._trade_sid = sid
 
         else:
             logger.debug("Unhandled message type=%s: %s", msg_type, msg)

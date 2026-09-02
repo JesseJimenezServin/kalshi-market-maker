@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
     quote_no_size REAL
 );
 
+CREATE TABLE IF NOT EXISTS market_switches (
+    ts REAL NOT NULL,
+    old_ticker TEXT NOT NULL,
+    new_ticker TEXT NOT NULL,
+    reason TEXT NOT NULL,  -- "volatile" or "crowded"
+    net_yes_contracts_flattened INTEGER  -- NULL if there was nothing to flatten
+);
+
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ticker_ts ON simulated_fills(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ticker_ts ON inventory_marks(ticker, ts);
@@ -109,6 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_incentive_snap_ticker_ts ON incentive_program_sna
 CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_news_events_ticker_ts ON news_events(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_ts ON quote_snapshots(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_market_switches_ts ON market_switches(ts);
 """
 
 
@@ -287,4 +296,20 @@ class SimulationLogger:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, risk_level,
                  quote_yes_price, quote_yes_size, quote_no_price, quote_no_size),
+            )
+
+    def log_market_switch(
+        self,
+        old_ticker: str,
+        new_ticker: str,
+        reason: str,
+        net_yes_contracts_flattened: int | None = None,
+        ts: float | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO market_switches
+                   (ts, old_ticker, new_ticker, reason, net_yes_contracts_flattened)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (ts or time.time(), old_ticker, new_ticker, reason, net_yes_contracts_flattened),
             )

@@ -30,12 +30,20 @@ sustained data-collection window.
   real trade flow against a hypothetical resting quote
 - logger.py -- SQLite persistence (snapshot_scores, simulated_fills,
   inventory_marks, orderbook_snapshots, incentive_program_snapshots,
-  simulated_stop_losses, news_events, quote_snapshots tables)
+  simulated_stop_losses, news_events, quote_snapshots, market_switches
+  tables)
 - risk_engine.py -- per-market RiskEngine: rolling mid-price volatility +
   inventory fraction -> composite LOW/ELEVATED/HIGH risk level
-- quoting_policy.py -- active quoting policy: inventory skew, widen/pull
+- quoting_policy.py -- active quoting policy: rests at the live Reference
+  Price (not just the touch) before applying inventory skew, widen/pull
   on risk escalation, simulated hard-stop flatten (crosses the spread via
   adverse_selection_sim.InventoryState, still no real orders)
+- market_switcher.py -- event-triggered market switcher: pure building
+  blocks (crowding ratio, sustain+cooldown trigger logic, candidate
+  search) -- NOT a continuous re-optimizer, opt-in via
+  config.MARKET_SWITCHER_ENABLED (default False). Orchestration loop
+  lives in main.py (market_switch_loop) to avoid a circular import with
+  MarketRuntimeState.
 - news_feed.py -- zero-cost news-awareness signal: polls GDELT's free
   Doc 2.0 API (no key required), rule-based keyword-overlap relevance
   scoring (no LLM), feeds a decaying news_signal into RiskEngine
@@ -156,27 +164,84 @@ sustained data-collection window.
   $1,884 and $6,905 -- in line with what a ~1hr sample should plausibly
   support. New regression test for ScreenedProgram.total_period_days;
   16/16 tests passing.
+- 2026-09-02 CORRECTION (no code change): re-examined reward_simulator.py's
+  score_hypothetical_order after describing it in conversation as having a
+  "my_share double-counting bug" -- that description does NOT match the
+  actual code. The code comment there is stale/misleading (claims it
+  "attributes ALL size at my_price...to me"), but the real line
+  (`my_raw += my_size * mult`) only ever credits our own contribution;
+  the denominator (total_raw) correctly includes everyone's size,
+  including our own addition. This is NOT a double-counting bug --
+  reward_simulator.py was NOT modified. If EstSoFar still looks high, the
+  more likely explanation is that these are genuinely thin, under-served
+  markets (exactly what the reward-density heuristic favors), where a
+  modest 100-contract entrant can legitimately represent an outsized
+  share -- not a numerator defect.
+- 2026-09-02 (completed): Reference-Price-aware quoting. quoting_policy.py
+  now rests at the live Reference Price (reward_simulator.compute_reference_price
+  on the real book) instead of always joining the touch, before applying
+  inventory skew/risk widening. Since price >= Reference Price always
+  gets the full (undiscounted) multiplier, this gives whatever safety
+  margin is genuinely free on a given market at a given moment (e.g. 4c
+  observed live on KXNFLSTADIUM on 2026-09-01) at zero reward cost --
+  markets where the touch alone already clears the threshold (e.g.
+  KXCITYCHAMPS, Reference Price == touch) correctly get no free margin,
+  rather than a fixed offset that would be free on one market and
+  needlessly expensive (via discount_factor) on another. New regression
+  test; 17/17 passing.
+- 2026-09-02 (completed): Event-triggered market switcher (market_switcher.py),
+  opt-in via config.MARKET_SWITCHER_ENABLED (default False, NOT yet
+  enabled on the live run). Stays in currently-watched markets by
+  default; only searches for a replacement when a CURRENTLY watched
+  market sustains (config.SWITCH_TRIGGER_SUSTAIN_SEC, default 5 min)
+  either HIGH risk or a crowding ratio (real resting depth vs.
+  target_size) above config.CROWDING_RATIO_THRESHOLD, respecting a
+  global config.MARKET_SWITCH_COOLDOWN_SEC (default 30 min) between
+  switches -- deliberately not a continuous re-optimizer. Candidate
+  replacements are pre-screened via a single live get_orderbook call
+  (CONFIRMED shape 2026-09-02: {"orderbook_fp": {"yes_dollars": [...],
+  "no_dollars": [...]}}) -- crowding can be checked this way without
+  ever having watched a candidate; volatility can't (needs a time
+  series), which is why crowding is the sole criterion for evaluating
+  replacements. A switch flattens any open position first (reusing
+  quoting_policy.flatten_position, extracted from the existing
+  maybe_execute_stop_loss so both share identical crossing logic), then
+  uses ws_client's new add_ticker/remove_ticker methods
+  (CONFIRMED live 2026-09-02 against a standalone throwaway connection:
+  Kalshi's update_subscription supports action="add_markets"/
+  "delete_markets"). Runtime-only -- does not rewrite
+  config.WATCHED_MARKET_TICKERS; a restart reverts to the configured
+  list. New market_switches SQLite table for audit. 2 new tests (crowding
+  ratio computation, sustain+cooldown trigger gating); 19/19 passing.
+  NOT YET EXERCISED against a real trigger in production (still disabled
+  by default) -- the sustain/cooldown logic is unit-tested with synthetic
+  timestamps, not observed live.
 
 ## Known simplifications / open items
 - analysis.py's `EstSoFar`/`IfFullPeriod` dollar rewards are OPTIMISTIC
-  UPPER BOUNDS, not guaranteed figures: they assume no double-counting
-  with other participants resting at our exact quoted price (same
-  simplification as reward_simulator.py's my_share estimate), and assume
-  the Time Period Score aggregates as a simple average of snapshot scores
-  over however much of the window we've collected so far -- unverified
-  against Kalshi's real methodology. `EstSoFar` IS now properly prorated
-  by elapsed time vs. the full program period (fixed 2026-09-01), but
-  still assumes our observed average score is representative of the rest
-  of the period, just time-scaled -- not adjusted for anything else
-  (volatility regime changes, other LPs arriving/leaving, etc.).
+  UPPER BOUNDS, not guaranteed figures: they assume the Time Period Score
+  aggregates as a simple average of snapshot scores over however much of
+  the window we've collected so far -- unverified against Kalshi's real
+  methodology (see 2026-09-02 correction above -- my_share itself is
+  NOT double-counting, this is a separate, still-open uncertainty about
+  period-level aggregation). `EstSoFar` IS now properly prorated by
+  elapsed time vs. the full program period (fixed 2026-09-01), but still
+  assumes our observed average score is representative of the rest of the
+  period, just time-scaled -- not adjusted for anything else (volatility
+  regime changes, other LPs arriving/leaving, etc.).
 - News-awareness signal is zero-cost (GDELT + keyword heuristic, no LLM
   classification, no paid APIs). Quality is a known limitation vs. a
   true NLP/LLM classifier -- expect false positives/negatives; flagged as
   a future upgrade path if paper-trading data suggests it's too noisy or
   misses real signal.
-- "My share" of reward score still assumes we're the ONLY provider at our
-  exact price level -- overestimates share if others already quote there.
-  True fix requires Phase 1 real fills, not fixable in pure simulation.
+- "My share" of reward score is computed against the REAL live book
+  (our contribution alone in the numerator, everyone's total including
+  ours in the denominator -- verified 2026-09-02, not the double-counting
+  bug this was previously mis-described as). What it can't model is
+  competitive RESPONSE: other real participants might change their own
+  behavior once we're resting there too, which no snapshot of the public
+  book can tell us. True validation requires Phase 1 real fills, not
+  fixable in pure simulation.
 - No hosting/deployment yet -- main.py and server.py both currently run
   locally only.
 - Stop-loss events (simulated_stop_losses) now flash-highlight their

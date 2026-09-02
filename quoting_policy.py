@@ -15,6 +15,7 @@ import time
 import config
 from adverse_selection_sim import HypotheticalQuote, InventoryState
 from orderbook import MarketBook
+from reward_simulator import compute_reference_price
 from risk_engine import ELEVATED, HIGH
 
 
@@ -28,10 +29,28 @@ def compute_quote(
     inventory: InventoryState,
     base_size: int,
     max_inventory: int,
+    target_size: float,
 ) -> HypotheticalQuote | None:
     """
-    Base case (risk_level LOW, flat inventory): join best bid each side at
-    base_size, identical to the old refresh_quote_from_book behavior.
+    Base case (risk_level LOW, flat inventory): rest at the live Reference
+    Price on each side (falling back to the touch if that side never
+    reaches the 1/5-of-target-size threshold), instead of always joining
+    the touch exactly.
+
+    Why: reward_simulator's distance_multiplier is 1.0 for any price
+    at-or-better than the Reference Price -- resting exactly AT the
+    Reference Price (which compute_reference_price guarantees is
+    at-or-below the touch) gets the identical full multiplier as resting
+    at the touch, but with strictly more distance from the touch for
+    free. Confirmed live 2026-09-01: on a thinner book the Reference
+    Price can sit several cents below the touch (free safety margin,
+    unused by the old touch-joining rule); on a book where the touch
+    alone already clears the threshold, Reference Price == touch and
+    there's no free margin to give -- this naturally adapts to whichever
+    is true on a given market at a given moment, rather than assuming a
+    fixed offset that would be free on one market and needlessly
+    expensive (via the discount_factor penalty below the Reference
+    Price) on another.
 
     Inventory skew: shift yes_price down / no_price up proportional to
     net_yes_contracts / max_inventory, capped at
@@ -41,9 +60,9 @@ def compute_quote(
     no fill) -- and symmetrically for a short-yes/long-no position.
 
     Risk-level reaction (applied after skew):
-      LOW      -> skewed touch-join, unchanged size.
+      LOW      -> skewed Reference-Price base, unchanged size.
       ELEVATED -> skewed quote widened by config.WIDEN_TICKS_ELEVATED ticks
-                  off the best bid on each side.
+                  further from that base on each side.
       HIGH     -> quote pulled entirely (returns None). The caller is
                   responsible for separately invoking maybe_execute_stop_loss
                   to decide whether inventory should be actively flattened.
@@ -56,7 +75,10 @@ def compute_quote(
     if best_yes is None or best_no is None:
         return None
 
-    yes_price, no_price = best_yes[0], best_no[0]
+    yes_ref = compute_reference_price(book.yes_side_sorted_desc(), target_size)
+    no_ref = compute_reference_price(book.no_side_sorted_desc(), target_size)
+    yes_price = yes_ref if yes_ref is not None else best_yes[0]
+    no_price = no_ref if no_ref is not None else best_no[0]
 
     if max_inventory > 0:
         skew_ticks = round(
@@ -86,33 +108,26 @@ def compute_quote(
     )
 
 
-def maybe_execute_stop_loss(
+def flatten_position(
     book: MarketBook,
     inventory: InventoryState,
-    risk_level: str,
     max_inventory: int,
-    hard_stop_fraction: float,
+    reason: str,
 ) -> dict | None:
     """
     Simulates an ACTIVE taker flatten (crossing the spread to close our
-    hypothetical position) when risk_level is HIGH and our inventory
-    fraction is at/above hard_stop_fraction. This mutates `inventory`
-    directly via apply_yes_fill/apply_no_fill and is a DISTINCT simulated
-    event from passive fills recorded by process_trade_for_inventory.
+    hypothetical position), unconditionally -- the caller has already
+    decided flattening is warranted (HIGH-risk hard stop, or leaving this
+    market entirely via the switcher). This mutates `inventory` directly
+    via apply_yes_fill/apply_no_fill and is a DISTINCT simulated event
+    from passive fills recorded by process_trade_for_inventory.
 
-    Returns a dict of fill details for logging, or None if no flatten
-    happened this tick (risk not HIGH, inventory under threshold, size
-    already zero, or the book is missing the side needed to cross).
+    Returns a dict of fill details for logging, or None if there's
+    nothing to flatten (already flat, or the book is missing the side
+    needed to cross).
     """
-    if risk_level != HIGH:
-        return None
-    if max_inventory <= 0:
-        return None
-
     net = inventory.net_yes_contracts
     if net == 0:
-        return None
-    if abs(net) / max_inventory < hard_stop_fraction:
         return None
 
     if net > 0:
@@ -146,6 +161,31 @@ def maybe_execute_stop_loss(
         "size": applied,
         "net_yes_contracts_before": net,
         "net_yes_contracts_after": inventory.net_yes_contracts,
-        "reason": "hard_stop_flatten",
+        "reason": reason,
         "ts": time.time(),
     }
+
+
+def maybe_execute_stop_loss(
+    book: MarketBook,
+    inventory: InventoryState,
+    risk_level: str,
+    max_inventory: int,
+    hard_stop_fraction: float,
+) -> dict | None:
+    """
+    Thin gate in front of flatten_position: only flattens when risk_level
+    is HIGH and our inventory fraction is at/above hard_stop_fraction.
+    """
+    if risk_level != HIGH:
+        return None
+    if max_inventory <= 0:
+        return None
+
+    net = inventory.net_yes_contracts
+    if net == 0:
+        return None
+    if abs(net) / max_inventory < hard_stop_fraction:
+        return None
+
+    return flatten_position(book, inventory, max_inventory, reason="hard_stop_flatten")

@@ -168,6 +168,41 @@ NEWS_RELEVANCE_THRESHOLD = 0.2
 NEWS_SIGNAL_DECAY_MINUTES = 45
 
 # --------------------------------------------------------------------------
+# Event-triggered market switcher (opt-in, off by default)
+# --------------------------------------------------------------------------
+# Deliberately NOT a continuous re-optimizer: stays in currently-watched
+# markets by default, and only searches for a replacement when the
+# CURRENT market gives a sustained, clear signal to leave. Runtime-only --
+# does not rewrite WATCHED_MARKET_TICKERS above; a restart reverts to
+# whatever's configured there. See market_switcher.py.
+MARKET_SWITCHER_ENABLED = False
+
+# Real resting depth (both sides, real book only) relative to
+# target_size, above which a CURRENTLY watched market is considered
+# "crowded" -- diminishing marginal share for a new entrant. 1.0 means
+# real depth alone already equals the qualification threshold.
+CROWDING_RATIO_THRESHOLD = 3.0
+
+# A candidate replacement market must be at/below this crowding ratio
+# (checked via a single live get_orderbook call, not extended
+# observation) to be considered under-served enough to switch into.
+SWITCH_CANDIDATE_MAX_CROWDING_RATIO = 1.0
+
+# How long (seconds) a trigger condition (HIGH risk or crowded) must hold
+# CONTINUOUSLY before acting -- avoids switching on a single noisy tick.
+SWITCH_TRIGGER_SUSTAIN_SEC = 300  # 5 minutes
+
+# Minimum time (seconds) between any two switches, regardless of how many
+# tickers are triggering at once -- "does not need to be switching
+# rapidly, only when needed."
+MARKET_SWITCH_COOLDOWN_SEC = 1800  # 30 minutes
+
+# How often (seconds) the switcher checks trigger conditions. Doesn't need
+# to be as tight as the ~1s scoring cadence, since triggers require
+# multi-minute sustained conditions anyway.
+MARKET_SWITCH_CHECK_INTERVAL_SEC = 30
+
+# --------------------------------------------------------------------------
 # Storage
 # --------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent

@@ -14,6 +14,7 @@ from main import build_market_states, compute_my_share_at_touched_price
 from risk_engine import RiskEngine, LOW, ELEVATED, HIGH
 from quoting_policy import compute_quote, maybe_execute_stop_loss
 from news_feed import score_relevance
+from market_switcher import MarketSwitcher, compute_crowding_ratio
 import config
 
 
@@ -274,8 +275,8 @@ def test_compute_quote_skews_toward_flattening_long_inventory():
     flat_inventory = InventoryState(ticker="TEST")
     long_inventory = InventoryState(ticker="TEST", net_yes_contracts=400)
 
-    flat_quote = compute_quote(book, LOW, flat_inventory, base_size=100, max_inventory=500)
-    long_quote = compute_quote(book, LOW, long_inventory, base_size=100, max_inventory=500)
+    flat_quote = compute_quote(book, LOW, flat_inventory, base_size=100, max_inventory=500, target_size=100)
+    long_quote = compute_quote(book, LOW, long_inventory, base_size=100, max_inventory=500, target_size=100)
 
     assert flat_quote is not None and long_quote is not None
     # Long yes should skew the quote to encourage flattening: worse (lower)
@@ -284,6 +285,34 @@ def test_compute_quote_skews_toward_flattening_long_inventory():
     assert long_quote.no_price >= flat_quote.no_price
     assert (long_quote.yes_price, long_quote.no_price) != (flat_quote.yes_price, flat_quote.no_price)
     print("test_compute_quote_skews_toward_flattening_long_inventory: PASS")
+
+
+def test_compute_quote_rests_at_reference_price_not_touch_when_they_differ():
+    # target_size=1000 -> threshold = 200. Neither side's touch alone
+    # reaches that; walking down, cumulative crosses 200 at the 3rd level
+    # on each side -- so Reference Price sits 2 ticks below the touch on
+    # both sides. compute_quote should rest there (free safety margin,
+    # same 1.0 multiplier), not at the touch.
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(
+        sid=1, seq=1,
+        yes=[[50, 50], [49, 60], [48, 100]],   # cumulative: 50, 110, 210
+        no=[[48, 50], [47, 60], [46, 100]],    # cumulative: 50, 110, 210
+    )
+    inventory = InventoryState(ticker="TEST")
+
+    quote = compute_quote(book, LOW, inventory, base_size=100, max_inventory=500, target_size=1000)
+
+    assert quote is not None
+    assert quote.yes_price == 48, quote.yes_price  # NOT the touch (50)
+    assert quote.no_price == 46, quote.no_price     # NOT the touch (48)
+
+    # Sanity-check this is genuinely free: the multiplier at the Reference
+    # Price itself is always 1.0 by definition (price >= reference_price),
+    # already covered by test_score_hypothetical_order_qualifies_and_shares_correctly --
+    # this test only needs to confirm compute_quote actually picks that
+    # price instead of the touch, which the asserts above already do.
+    print("test_compute_quote_rests_at_reference_price_not_touch_when_they_differ: PASS")
 
 
 def test_risk_engine_escalates_to_high_on_volatile_mid():
@@ -393,6 +422,44 @@ def test_risk_engine_news_signal_escalates_then_decays():
     print("test_risk_engine_news_signal_escalates_then_decays: PASS")
 
 
+def test_compute_crowding_ratio():
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 300]], no=[[48, 300]])
+    # (300 + 300) / (2 * target_size), target_size=100 -> 600/200 = 3.0
+    ratio = compute_crowding_ratio(book, target_size=100)
+    assert abs(ratio - 3.0) < 1e-9, ratio
+    assert compute_crowding_ratio(book, target_size=0) is None
+    print("test_compute_crowding_ratio: PASS")
+
+
+def test_market_switcher_trigger_requires_sustain_and_cooldown():
+    switcher = MarketSwitcher()
+    t0 = 1_000_000.0
+
+    # Not sustained yet -- must not fire on the very first sighting.
+    assert switcher.check_trigger("A", HIGH, None, now=t0) is None
+    # Still under the sustain window.
+    assert switcher.check_trigger("A", HIGH, None, now=t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC - 1) is None
+    # Sustained long enough, no prior switch -> fires.
+    trigger = switcher.check_trigger("A", HIGH, None, now=t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 1)
+    assert trigger == "volatile", trigger
+
+    switch_ts = t0 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 1
+    switcher.record_switch(now=switch_ts)
+
+    # Immediately after switching, even though the condition still holds,
+    # the global cooldown blocks another switch.
+    assert switcher.check_trigger("A", HIGH, None, now=switch_ts + 1) is None
+
+    # A different ticker, crowded (not volatile), sustained past both the
+    # sustain window AND the cooldown window from the first switch.
+    t1 = switch_ts + config.MARKET_SWITCH_COOLDOWN_SEC + 1
+    assert switcher.check_trigger("B", LOW, 10.0, now=t1) is None  # first sighting
+    trigger2 = switcher.check_trigger("B", LOW, 10.0, now=t1 + config.SWITCH_TRIGGER_SUSTAIN_SEC + 1)
+    assert trigger2 == "crowded", trigger2
+    print("test_market_switcher_trigger_requires_sustain_and_cooldown: PASS")
+
+
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
     test_orderbook_delta_unrecognized_shape_marks_stale_not_crash()
@@ -406,8 +473,11 @@ if __name__ == "__main__":
     test_build_market_states_uses_real_incentive_program_values()
     test_compute_my_share_at_touched_price_level()
     test_compute_quote_skews_toward_flattening_long_inventory()
+    test_compute_quote_rests_at_reference_price_not_touch_when_they_differ()
     test_risk_engine_escalates_to_high_on_volatile_mid()
     test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
     test_score_relevance_keyword_overlap()
     test_risk_engine_news_signal_escalates_then_decays()
+    test_compute_crowding_ratio()
+    test_market_switcher_trigger_requires_sustain_and_cooldown()
     print("\nALL TESTS PASSED")

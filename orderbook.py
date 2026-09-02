@@ -224,3 +224,9 @@ class OrderbookManager:
     def needs_resync(self, ticker: str) -> bool:
         book = self.books.get(ticker)
         return book is None or book.stale
+
+    def remove(self, ticker: str) -> None:
+        """Drops local book state for a ticker we're no longer watching
+        (e.g. after a market switch) -- avoids stale/orphaned data lingering
+        in memory or getting picked up by anything iterating self.books."""
+        self.books.pop(ticker, None)

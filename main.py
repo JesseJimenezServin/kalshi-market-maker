@@ -49,6 +49,7 @@ import quoting_policy
 from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
 from singleton_lock import acquire_singleton_lock
+from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement
 
 logger = logging.getLogger("main")
 
@@ -160,6 +161,7 @@ async def scoring_loop(
                 state.inventory,
                 config.DEFAULT_SIMULATED_QUOTE_SIZE,
                 config.MAX_SIMULATED_INVENTORY,
+                state.target_size,
             )
 
             # Pure instrumentation for the dashboard (server.py) -- main.py
@@ -248,6 +250,95 @@ async def incentive_refresh_loop(
         except Exception:
             logger.exception("Incentive screen failed")
         await asyncio.sleep(interval_sec)
+
+
+async def market_switch_loop(
+    rest_client: KalshiRestClient,
+    ws_client: KalshiWebSocketClient,
+    orderbook_manager: OrderbookManager,
+    states: dict[str, MarketRuntimeState],
+    sim_logger: SimulationLogger,
+    interval_sec: float,
+) -> None:
+    """
+    Periodically checks each currently-watched ticker for a sustained
+    trigger condition (see market_switcher.MarketSwitcher), and if one
+    fires and a replacement is found, performs the switch: flattens any
+    open hypothetical position on the old ticker, unsubscribes it,
+    subscribes the replacement, and swaps its MarketRuntimeState into
+    `states`. No-ops entirely if config.MARKET_SWITCHER_ENABLED is False.
+    Mutates `states` in place -- scoring_loop/make_trade_handler both
+    iterate/read the same dict, so a switch takes effect on their very
+    next tick.
+    """
+    if not config.MARKET_SWITCHER_ENABLED:
+        logger.info("Market switcher disabled (config.MARKET_SWITCHER_ENABLED = False) -- market_switch_loop is a no-op.")
+        return
+
+    switcher = MarketSwitcher()
+
+    while True:
+        await asyncio.sleep(interval_sec)
+
+        for ticker in list(states.keys()):
+            state = states[ticker]
+            book = orderbook_manager.books.get(ticker)
+            if book is None or book.stale:
+                continue
+
+            crowding = compute_crowding_ratio(book, state.target_size)
+            trigger = switcher.check_trigger(ticker, state.risk_engine.risk_level, crowding)
+            if trigger is None:
+                continue
+
+            logger.warning(
+                "%s: sustained '%s' trigger fired (risk=%s, crowding=%s) -- searching for a replacement market",
+                ticker, trigger, state.risk_engine.risk_level, crowding,
+            )
+
+            # screen_incentive_programs + per-candidate get_orderbook calls
+            # are blocking `requests` calls -- keep them off the event loop.
+            replacement = await asyncio.to_thread(find_replacement, rest_client, set(states.keys()))
+            if replacement is None:
+                continue  # stay put; retried next interval if still triggered
+
+            fill = quoting_policy.flatten_position(
+                book, state.inventory, config.MAX_SIMULATED_INVENTORY, reason=f"market_switch_{trigger}",
+            )
+            if fill is not None:
+                sim_logger.log_simulated_stop_loss(ticker=ticker, **fill)
+
+            removed = await ws_client.remove_ticker(ticker)
+            if not removed:
+                logger.error("%s: failed to remove from live subscription -- aborting this switch attempt", ticker)
+                continue
+
+            added = await ws_client.add_ticker(replacement.market_ticker)
+            if not added:
+                logger.error(
+                    "%s: failed to add replacement to live subscription after removing %s -- "
+                    "now watching neither until the next interval retries",
+                    replacement.market_ticker, ticker,
+                )
+                continue
+
+            net_flattened = fill["net_yes_contracts_before"] if fill else None
+            del states[ticker]
+            switcher.clear_ticker(ticker)
+            states[replacement.market_ticker] = MarketRuntimeState(
+                replacement.market_ticker,
+                target_size=replacement.target_size,
+                discount_factor=replacement.discount_factor_bps / 10000.0,
+            )
+
+            sim_logger.log_market_switch(
+                old_ticker=ticker,
+                new_ticker=replacement.market_ticker,
+                reason=trigger,
+                net_yes_contracts_flattened=net_flattened,
+            )
+            switcher.record_switch()
+            logger.warning("Switched from %s to %s (reason=%s)", ticker, replacement.market_ticker, trigger)
 
 
 def make_trade_handler(
@@ -349,6 +440,7 @@ async def run() -> None:
         scoring_loop(orderbook_manager, states, sim_logger),
         incentive_refresh_loop(rest_client, sim_logger, config.INCENTIVE_POLL_INTERVAL_SEC),
         news_refresh_loop(rest_client, states, sim_logger, config.NEWS_POLL_INTERVAL_SEC),
+        market_switch_loop(rest_client, ws_client, orderbook_manager, states, sim_logger, config.MARKET_SWITCH_CHECK_INTERVAL_SEC),
     )
 
 

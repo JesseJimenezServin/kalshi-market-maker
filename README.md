@@ -147,22 +147,31 @@ several quiet weeks, that market is a candidate for the small live pilot
 1. **"My share" estimation.** The public order book only shows aggregate
    size per price level, not individual participants. `reward_simulator.py`
    estimates your share by adding your hypothetical size on top of the
-   existing level — this **overestimates** your share if other real
-   liquidity providers are already resting at your exact price. Treat
-   Phase 0 reward numbers as an optimistic upper bound, not a guarantee.
+   existing level, crediting only your own contribution in the numerator
+   (verified 2026-09-02 — an earlier comment here claiming it double-counted
+   others' resting size was itself wrong and has been corrected). What it
+   genuinely can't model is competitive *response*: other real liquidity
+   providers might change their own behavior once you're resting there
+   too, which no snapshot of the public book can reveal. Treat Phase 0
+   reward numbers as an optimistic estimate, not a guarantee — validating
+   that gap requires Phase 1 real fills.
 
 2. **Fill-probability heuristic in adverse-selection sim.** `main.py` now
    computes `my_share_estimate` from the live resting size at the exact
    touched price level at the moment of the trade (see
    `compute_my_share_at_touched_price` in `main.py`), rather than a fixed
-   placeholder. It still shares the same overestimation caveat as #1
-   above (assumes we're the only provider at that price).
+   placeholder. It shares the same competitive-response caveat as #1
+   above (assumes other participants' behavior at that price doesn't
+   change in response to us).
 
-3. **Quoting policy is naive.** `MarketRuntimeState.refresh_quote_from_book`
-   just joins the best bid on both sides. It doesn't yet implement
-   inventory skew or pull quotes ahead of scheduled news. That's
-   intentional for Phase 0 — we want a simple baseline to measure, and to
-   improve on once we see where the naive policy struggles.
+3. **Quoting policy.** `quoting_policy.compute_quote` rests at the live
+   Reference Price (not just the touch) before applying inventory skew
+   and risk-based widening/pulling — see `risk_engine.py` for the
+   LOW/ELEVATED/HIGH escalation and `market_switcher.py` (opt-in, off by
+   default) for switching away from a market that sustains HIGH risk or
+   high crowding. Still intentionally simple relative to a fully
+   optimized policy — the point of Phase 0 is a measurable baseline to
+   improve on, not a finished strategy.
 
 4. **Target Size / Discount Factor.** `main.py` now seeds each watched
    market's `MarketRuntimeState` with the real `target_size` and

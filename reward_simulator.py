@@ -104,12 +104,16 @@ def score_hypothetical_order(
         raw = size * mult
         total_raw += raw
         if price == my_price:
-            # NOTE: this attributes ALL size at my_price (including any
-            # pre-existing resting size from other participants) to me,
-            # which OVERESTIMATES my share if others already quote at the
-            # exact same price. This is a known simplification -- see
-            # README for how Phase 1 live data will let us refine it using
-            # our own actual order_id in the fills/user_orders stream.
+            # CORRECTED 2026-09-02 (comment only, this line's math was
+            # never wrong): only OUR OWN contribution (my_size) goes into
+            # the numerator here -- any pre-existing real resting size at
+            # this same price is excluded from my_raw and only counted in
+            # total_raw (the denominator, via `raw` above), so this is
+            # NOT double-counting. What this genuinely can't model is
+            # competitive RESPONSE -- other real participants might change
+            # their own behavior once we're resting here too, which no
+            # snapshot of the public book can tell us. True validation of
+            # that needs Phase 1 real fills, not fixable in pure simulation.
             my_raw += my_size * mult
 
     if total_raw <= 0:
