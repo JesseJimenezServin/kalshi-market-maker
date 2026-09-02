@@ -112,6 +112,26 @@ def build_market_states(
     return states
 
 
+def fetch_market_metadata(rest_client: KalshiRestClient, ticker: str) -> tuple[str | None, str | None]:
+    """
+    Fetches `ticker`'s real title/subtitle via the existing GET-only
+    rest_client.get_market -- so the dashboard can show a human-readable
+    market name instead of just the raw ticker. Title/subtitle are
+    effectively static once a market exists, so this is only called
+    once per ticker (when it starts being watched -- see run() and
+    market_switch_loop below), not on a recurring poll. Returns
+    (None, None) (logging a warning, never raising) on any failure.
+    """
+    try:
+        response = rest_client.get_market(ticker)
+    except Exception:
+        logger.warning("Failed to fetch market metadata for %s", ticker, exc_info=True)
+        return None, None
+
+    market = response.get("market", response)
+    return market.get("title"), market.get("subtitle")
+
+
 def compute_my_share_at_touched_price(
     book,
     quote: HypotheticalQuote,
@@ -183,7 +203,9 @@ async def scoring_loop(
             # Pure instrumentation for the dashboard (server.py) -- main.py
             # and server.py are separate processes with no shared memory,
             # so this is the only way the dashboard can see the current
-            # quote/risk level. Does not affect any risk/quoting decision.
+            # quote/risk level (and, below, WHY: the individual inputs
+            # that composed into it, plus our "competition level" proxy).
+            # Does not affect any risk/quoting decision.
             sim_logger.log_quote_snapshot(
                 ticker=ticker,
                 risk_level=state.risk_engine.risk_level,
@@ -191,6 +213,11 @@ async def scoring_loop(
                 quote_yes_size=state.quote.yes_size if state.quote else None,
                 quote_no_price=state.quote.no_price if state.quote else None,
                 quote_no_size=state.quote.no_size if state.quote else None,
+                volatility_level=state.risk_engine.volatility_level,
+                inventory_level=state.risk_engine.inventory_level,
+                news_signal=state.risk_engine.news_signal,
+                event_signal=state.risk_engine.event_signal,
+                crowding_ratio=compute_crowding_ratio(book, state.target_size),
             )
 
             fill = quoting_policy.maybe_execute_stop_loss(
@@ -272,6 +299,8 @@ async def incentive_refresh_loop(
                         discount_factor_bps=program.discount_factor_bps,
                         days_remaining=program.days_remaining,
                         total_period_days=program.total_period_days,
+                        start_date=program.start_date.isoformat(),
+                        end_date=program.end_date.isoformat(),
                     )
         except Exception:
             logger.exception("Incentive screen failed")
@@ -370,6 +399,11 @@ async def market_switch_loop(
                 # not a full portfolio rebalance (see capital_allocator.py).
                 max_inventory=state.max_inventory,
             )
+
+            # fetch_market_metadata makes a blocking `requests` call --
+            # keep it off the event loop, same as the other REST calls above.
+            title, subtitle = await asyncio.to_thread(fetch_market_metadata, rest_client, replacement.market_ticker)
+            sim_logger.upsert_market_metadata(ticker=replacement.market_ticker, title=title, subtitle=subtitle)
 
             sim_logger.log_market_switch(
                 old_ticker=ticker,
@@ -516,6 +550,17 @@ async def run() -> None:
         "Starting balance $%.0f allocated across %d market(s): %s",
         config.STARTING_CAPITAL_USD, len(states), {t: s.max_inventory for t, s in states.items()},
     )
+
+    # One-time fetch (not a recurring poll -- title/subtitle are
+    # effectively static) so the dashboard can show a human-readable
+    # market name instead of just the raw ticker. Blocking `requests`
+    # calls, run off the event loop.
+    def _fetch_and_store_all_market_metadata() -> None:
+        for t in states:
+            title, subtitle = fetch_market_metadata(rest_client, t)
+            sim_logger.upsert_market_metadata(ticker=t, title=title, subtitle=subtitle)
+
+    await asyncio.to_thread(_fetch_and_store_all_market_metadata)
 
     ws_client = KalshiWebSocketClient(
         tickers=watched_tickers,

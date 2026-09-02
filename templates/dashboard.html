@@ -123,6 +123,10 @@
   .depth-bar.yes { background: var(--green); }
   .depth-bar.no { background: var(--red); }
 
+  .market-title { max-width: 260px; white-space: normal; font-weight: 500; }
+  .market-ticker { font-size: 10px; }
+  .risk-reason { font-size: 10px; max-width: 150px; white-space: normal; margin-top: 2px; }
+
   .alloc-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
   .alloc-ticker { width: 150px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; }
   .alloc-bar-track { flex: 1; height: 16px; background: #1a2129; border-radius: 2px; overflow: hidden; }
@@ -182,11 +186,14 @@
     <table id="markets-table">
       <thead>
         <tr>
-          <th>Ticker</th>
+          <th>Market</th>
           <th>Risk</th>
+          <th>Competition</th>
           <th>Target Size</th>
           <th>Discount Factor</th>
+          <th>Total Reward ($)</th>
           <th>Daily Pool ($)</th>
+          <th>Program Window</th>
           <th>Combined Score</th>
           <th>Qual/Total</th>
           <th>Net Pos</th>
@@ -194,7 +201,7 @@
           <th>Net P&amp;L</th>
         </tr>
       </thead>
-      <tbody><tr><td colspan="10" class="empty-state">Waiting for data...</td></tr></tbody>
+      <tbody><tr><td colspan="13" class="empty-state">Waiting for data...</td></tr></tbody>
     </table>
   </section>
 
@@ -291,10 +298,43 @@ function riskBadgeHtml(riskLevel) {
   return `<span class="badge ${riskLevel.toLowerCase()}">${riskLevel}</span>`;
 }
 
+function marketNameHtml(m) {
+  if (!m.title) return `<span class="market-ticker">${m.ticker}</span>`;
+  return `<div class="market-title">${m.title}</div><div class="market-ticker muted">${m.ticker}</div>`;
+}
+
+function riskCellHtml(m) {
+  const badge = riskBadgeHtml(m.risk_level);
+  if (!m.risk_reason) return badge;
+  return `${badge}<div class="risk-reason muted" title="${m.risk_reason}">${m.risk_reason}</div>`;
+}
+
+function competitionHtml(m) {
+  if (m.crowding_ratio === null || m.crowding_ratio === undefined) return "--";
+  // Real resting depth vs target_size -- our proxy for "competition
+  // level" (Kalshi doesn't publish one directly). >= CROWDING_RATIO_THRESHOLD
+  // colored red (matches when market_switcher.py would consider it too
+  // crowded to be worth staying in); otherwise green (room to qualify).
+  const cls = m.crowding_ratio >= 3.0 ? "neg" : "pos";
+  return `<span class="${cls}">${fmt(m.crowding_ratio, 2)}x</span>`;
+}
+
+function shortDate(iso) {
+  if (!iso) return "--";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "--";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function programWindowHtml(m) {
+  if (!m.program_start && !m.program_end) return "--";
+  return `${shortDate(m.program_start)} &rarr; ${shortDate(m.program_end)}`;
+}
+
 function renderMarketsTable(markets) {
   const tbody = document.querySelector("#markets-table tbody");
   if (!markets || markets.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No watched markets yet -- add tickers to config.py.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No watched markets yet -- add tickers to config.py.</td></tr>';
     return;
   }
 
@@ -308,11 +348,14 @@ function renderMarketsTable(markets) {
     const qualStr = m.total_snapshots ? `${m.qualifying_snapshots}/${m.total_snapshots}` : "--";
     return `
     <tr class="${isFlashing ? 'flash-row' : ''}">
-      <td>${m.ticker}</td>
-      <td>${riskBadgeHtml(m.risk_level)}</td>
+      <td>${marketNameHtml(m)}</td>
+      <td>${riskCellHtml(m)}</td>
+      <td>${competitionHtml(m)}</td>
       <td>${m.target_size !== null ? fmt(m.target_size, 0) : '<span class="muted">no active program</span>'}</td>
       <td>${m.discount_factor !== null ? fmt(m.discount_factor, 4) : "--"}</td>
+      <td>${m.total_reward !== null && m.total_reward !== undefined ? "$" + fmt(m.total_reward, 0) : "--"}</td>
       <td>${m.daily_pool !== null ? "$" + fmt(m.daily_pool, 2) : "--"}</td>
+      <td>${programWindowHtml(m)}</td>
       <td>${m.combined_score !== null ? fmt(m.combined_score, 4) : "--"}</td>
       <td>${qualStr}</td>
       <td>${m.net_yes_contracts !== null && m.net_yes_contracts !== undefined ? m.net_yes_contracts : "--"}</td>

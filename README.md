@@ -126,12 +126,14 @@ at least one volatility event) to be meaningful.
 Then open http://127.0.0.1:8000/ in a browser. This is a read-only FastAPI
 server that streams live updates from `data/paper_trading.sqlite` over a
 WebSocket once per second -- it never talks to Kalshi and places no orders.
-It shows the watched markets table (target size, discount factor, daily
-pool, net P&L), order book depth bars, a recent-fills table, a capital
-allocation panel (per-market $ and % of the current starting balance),
-a portfolio balance chart, and a reward-score-vs-P&L performance chart.
-Safe to run alongside `main.py` at any time (or on its own, before
-you've collected any data).
+It shows the watched markets table (real market name, risk level with a
+plain-English explanation of why, our crowding-based "competition
+level" proxy, target size, discount factor, total reward and program
+start/end dates, daily pool, net P&L), order book depth bars, a
+recent-fills table, a capital allocation panel (per-market $ and % of
+the current starting balance), a portfolio balance chart, and a
+reward-score-vs-P&L performance chart. Safe to run alongside `main.py`
+at any time (or on its own, before you've collected any data).
 
 ## Step 5 — analyze results
 

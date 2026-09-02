@@ -65,13 +65,16 @@ CREATE TABLE IF NOT EXISTS incentive_program_snapshots (
     target_size REAL,
     discount_factor_bps INTEGER,
     days_remaining REAL,
-    total_period_days REAL  -- full program period length, e.g. 14.0 for a
-                            -- 2-week program -- needed to fairly prorate
-                            -- an estimated reward by how much of the
-                            -- period we've actually observed (see
-                            -- analysis.py; added after a 2026-09-01 estimate
-                            -- projected a ~1hr sample across an entire
-                            -- 14-day pool with no time-scaling at all)
+    total_period_days REAL,  -- full program period length, e.g. 14.0 for a
+                             -- 2-week program -- needed to fairly prorate
+                             -- an estimated reward by how much of the
+                             -- period we've actually observed (see
+                             -- analysis.py; added after a 2026-09-01 estimate
+                             -- projected a ~1hr sample across an entire
+                             -- 14-day pool with no time-scaling at all)
+    start_date TEXT,  -- ISO8601, the program's real start/end (not
+    end_date TEXT     -- derivable from days_remaining/total_period_days
+                      -- alone once observed at a single point in time)
 );
 
 CREATE TABLE IF NOT EXISTS simulated_stop_losses (
@@ -105,7 +108,18 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
     quote_yes_price INTEGER,
     quote_yes_size REAL,
     quote_no_price INTEGER,
-    quote_no_size REAL
+    quote_no_size REAL,
+    -- risk_level's individual inputs (see risk_engine.RiskEngine.update),
+    -- so the dashboard can explain WHY risk_level is what it is, not
+    -- just show the final composite badge.
+    volatility_level TEXT,
+    inventory_level TEXT,
+    news_signal INTEGER,
+    event_signal INTEGER,
+    -- Real resting depth vs target_size (see
+    -- market_switcher.compute_crowding_ratio) -- Kalshi doesn't publish
+    -- a "competition level" directly, this is our own proxy for it.
+    crowding_ratio REAL
 );
 
 CREATE TABLE IF NOT EXISTS market_switches (
@@ -122,6 +136,15 @@ CREATE TABLE IF NOT EXISTS event_calendar_snapshots (
     close_time TEXT,           -- ISO8601, NULL if unavailable this poll
     hours_until_close REAL,    -- NULL if unavailable this poll
     flagged INTEGER NOT NULL   -- whether this nudged risk toward ELEVATED
+);
+
+CREATE TABLE IF NOT EXISTS market_metadata (
+    ticker TEXT PRIMARY KEY,  -- one row per ticker (upserted), not a time
+                              -- series -- title/subtitle are effectively
+                              -- static once a market exists
+    title TEXT,
+    subtitle TEXT,
+    ts REAL NOT NULL          -- when this row was last (re)fetched
 );
 
 CREATE INDEX IF NOT EXISTS idx_scores_ticker_ts ON snapshot_scores(ticker, ts);
@@ -169,6 +192,20 @@ class SimulationLogger:
         inventory_cols = {row[1] for row in conn.execute("PRAGMA table_info(inventory_marks)")}
         if "max_inventory" not in inventory_cols:
             conn.execute("ALTER TABLE inventory_marks ADD COLUMN max_inventory INTEGER")
+
+        program_cols = {row[1] for row in conn.execute("PRAGMA table_info(incentive_program_snapshots)")}
+        if "start_date" not in program_cols:
+            conn.execute("ALTER TABLE incentive_program_snapshots ADD COLUMN start_date TEXT")
+        if "end_date" not in program_cols:
+            conn.execute("ALTER TABLE incentive_program_snapshots ADD COLUMN end_date TEXT")
+
+        quote_cols = {row[1] for row in conn.execute("PRAGMA table_info(quote_snapshots)")}
+        for col, coltype in (
+            ("volatility_level", "TEXT"), ("inventory_level", "TEXT"),
+            ("news_signal", "INTEGER"), ("event_signal", "INTEGER"), ("crowding_ratio", "REAL"),
+        ):
+            if col not in quote_cols:
+                conn.execute(f"ALTER TABLE quote_snapshots ADD COLUMN {col} {coltype}")
 
     def log_snapshot_score(
         self,
@@ -249,16 +286,18 @@ class SimulationLogger:
         discount_factor_bps: int,
         days_remaining: float,
         total_period_days: float | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO incentive_program_snapshots
                    (ts, ticker, period_reward, target_size, discount_factor_bps,
-                    days_remaining, total_period_days)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    days_remaining, total_period_days, start_date, end_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, period_reward, target_size, discount_factor_bps,
-                 days_remaining, total_period_days),
+                 days_remaining, total_period_days, start_date, end_date),
             )
 
     def log_simulated_stop_loss(
@@ -307,16 +346,26 @@ class SimulationLogger:
         quote_yes_size: float | None,
         quote_no_price: int | None,
         quote_no_size: float | None,
+        volatility_level: str | None = None,
+        inventory_level: str | None = None,
+        news_signal: bool | None = None,
+        event_signal: bool | None = None,
+        crowding_ratio: float | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO quote_snapshots
                    (ts, ticker, risk_level, quote_yes_price, quote_yes_size,
-                    quote_no_price, quote_no_size)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    quote_no_price, quote_no_size, volatility_level, inventory_level,
+                    news_signal, event_signal, crowding_ratio)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, risk_level,
-                 quote_yes_price, quote_yes_size, quote_no_price, quote_no_size),
+                 quote_yes_price, quote_yes_size, quote_no_price, quote_no_size,
+                 volatility_level, inventory_level,
+                 None if news_signal is None else int(news_signal),
+                 None if event_signal is None else int(event_signal),
+                 crowding_ratio),
             )
 
     def log_market_switch(
@@ -333,6 +382,24 @@ class SimulationLogger:
                    (ts, old_ticker, new_ticker, reason, net_yes_contracts_flattened)
                    VALUES (?, ?, ?, ?, ?)""",
                 (ts or time.time(), old_ticker, new_ticker, reason, net_yes_contracts_flattened),
+            )
+
+    def upsert_market_metadata(
+        self,
+        ticker: str,
+        title: str | None,
+        subtitle: str | None,
+        ts: float | None = None,
+    ) -> None:
+        """One row per ticker, not a time series -- see market_metadata's
+        schema comment. Overwrites any previous row for this ticker."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO market_metadata (ticker, title, subtitle, ts)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(ticker) DO UPDATE SET title=excluded.title,
+                       subtitle=excluded.subtitle, ts=excluded.ts""",
+                (ticker, title, subtitle, ts or time.time()),
             )
 
     def log_event_calendar_snapshot(

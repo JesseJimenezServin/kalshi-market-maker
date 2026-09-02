@@ -19,6 +19,7 @@ from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
 from main import _select_initial_watchlist, MarketRuntimeState
 from capital_allocator import allocate_capital
+from server import _risk_reason
 import config
 
 
@@ -751,6 +752,39 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_risk_engine_exposes_sub_level_breakdown():
+    engine = RiskEngine(ticker="TEST")
+    inventory = InventoryState(ticker="TEST", net_yes_contracts=420)  # 420/500 = 0.84 -> HIGH
+
+    engine.update(50.0, inventory, max_inventory=500)
+    assert engine.risk_level == HIGH, engine.risk_level
+    assert engine.inventory_level == HIGH, engine.inventory_level
+    assert engine.volatility_level == LOW, engine.volatility_level  # stable mid so far
+    print("test_risk_engine_exposes_sub_level_breakdown: PASS")
+
+
+def test_risk_reason_attributes_only_the_actual_driving_factor():
+    # ELEVATED purely from a news hit -- volatility/inventory both LOW.
+    assert _risk_reason("ELEVATED", "LOW", "LOW", True, False) == "Elevated due to: recent news"
+
+    # HIGH from volatility alone -- an ELEVATED inventory_level must NOT
+    # be listed as a cause, since it isn't independently at HIGH severity
+    # (the actual composite-driving factor, per risk_engine.py's max-
+    # severity composition).
+    assert _risk_reason("HIGH", "HIGH", "ELEVATED", False, False) == "High due to: price volatility"
+
+    # Both volatility AND inventory independently at HIGH -- both listed.
+    assert _risk_reason("HIGH", "HIGH", "HIGH", False, False) == "High due to: price volatility, position size"
+
+    # news/event never explain a HIGH reading -- risk_engine.py only lets
+    # them nudge to ELEVATED, never straight to HIGH on their own.
+    assert _risk_reason("HIGH", "LOW", "LOW", True, True) == "HIGH (sub-signal data unavailable)"
+
+    assert _risk_reason("LOW", "LOW", "LOW", False, False) == "Normal conditions"
+    assert _risk_reason(None, None, None, None, None) is None
+    print("test_risk_reason_attributes_only_the_actual_driving_factor: PASS")
+
+
 def test_derive_keywords_ranks_capitalized_proper_nouns_first():
     # Real title observed live 2026-09-02 (KXMAMDANIEO-26SEP05-T0). The
     # old length-only ranking put "executive" (9 chars, generic) ahead
@@ -895,4 +929,6 @@ if __name__ == "__main__":
     test_parse_articles_handles_malformed_xml_gracefully()
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
+    test_risk_engine_exposes_sub_level_breakdown()
+    test_risk_reason_attributes_only_the_actual_driving_factor()
     print("\nALL TESTS PASSED")

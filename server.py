@@ -13,10 +13,15 @@ per second, built entirely from SQL queries against the SQLite file:
   - orderbook_snapshots -> per-market order book depth (for the depth bars)
   - incentive_program_snapshots -> per-market target size / discount factor / pool
   - simulated_fills    -> the 10 most recent simulated fills
-  - quote_snapshots    -> current hypothetical quote + risk level per market
-                          (main.py logs this purely for this dashboard --
-                          server.py and main.py are separate processes with
-                          no shared memory)
+  - quote_snapshots    -> current hypothetical quote + risk level (plus its
+                          individual inputs -- volatility/inventory/news/
+                          event -- and our crowding-ratio "competition
+                          level" proxy) per market (main.py logs this
+                          purely for this dashboard -- server.py and
+                          main.py are separate processes with no shared
+                          memory)
+  - market_metadata    -> real market title/subtitle per ticker (one row
+                          per ticker, not a time series -- see _market_metadata)
 
 Also derives, from the tables above:
   - a downsampled performance/balance history (reward score proxy, P&L,
@@ -52,13 +57,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("server")
-
-# Structural protection against running two instances at once (see
-# singleton_lock.py). The OS port bind already prevents true duplicates
-# here, but this gives a clear error message instead of a raw
-# "address already in use" and keeps the same protection pattern as
-# main.py, where nothing else prevented the 2026-09-01 incident.
-acquire_singleton_lock("server", config.BASE_DIR)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -198,6 +196,53 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     return {"reward_score": reward_series, "pnl_dollars": pnl_series, "balance_dollars": balance_series}
 
 
+def _market_metadata(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """market_metadata is one row per ticker (upserted by main.py when a
+    ticker starts being watched), not a time series -- no latest-per-
+    ticker windowing needed, just read it directly."""
+    rows = conn.execute("SELECT ticker, title, subtitle FROM market_metadata").fetchall()
+    return {r["ticker"]: r for r in rows}
+
+
+def _risk_reason(
+    risk_level: str | None,
+    volatility_level: str | None,
+    inventory_level: str | None,
+    news_signal: bool | None,
+    event_signal: bool | None,
+) -> str | None:
+    """
+    Human-readable explanation of WHY risk_level is what it is, from its
+    individual inputs (see risk_engine.RiskEngine.update -- risk_level is
+    the max severity across volatility, inventory, news, and event
+    proximity). A factor is listed only if it's independently AT the
+    composite's own severity -- e.g. if risk_level is HIGH because of
+    volatility alone, an ELEVATED inventory_level is correctly NOT listed
+    as a cause, since it isn't what's driving the composite. news/event
+    are never listed at HIGH -- risk_engine.py only ever lets them nudge
+    toward ELEVATED, never straight to HIGH on their own.
+    """
+    if risk_level is None:
+        return None
+    if risk_level == "LOW":
+        return "Normal conditions"
+
+    contributors = []
+    if volatility_level == risk_level:
+        contributors.append("price volatility")
+    if inventory_level == risk_level:
+        contributors.append("position size")
+    if risk_level == "ELEVATED":
+        if news_signal:
+            contributors.append("recent news")
+        if event_signal:
+            contributors.append("nearing close/resolution")
+
+    if not contributors:
+        return f"{risk_level} (sub-signal data unavailable)"
+    return f"{risk_level.capitalize()} due to: {', '.join(contributors)}"
+
+
 def _capital_allocation(conn: sqlite3.Connection, inventory: dict[str, sqlite3.Row]) -> list[dict]:
     """
     "Where is the money currently allocated" breakdown, derived from each
@@ -243,15 +288,18 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         )
         programs = _latest_per_ticker(
             conn, "incentive_program_snapshots",
-            "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining",
+            "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining, "
+            "start_date, end_date",
         )
         books = _latest_per_ticker(conn, "orderbook_snapshots", "ticker, ts, yes_levels, no_levels")
         quotes = _latest_per_ticker(
             conn, "quote_snapshots",
-            "ticker, ts, risk_level, quote_yes_price, quote_yes_size, quote_no_price, quote_no_size",
+            "ticker, ts, risk_level, quote_yes_price, quote_yes_size, quote_no_price, quote_no_size, "
+            "volatility_level, inventory_level, news_signal, event_signal, crowding_ratio",
         )
         qualifying_counts = _qualifying_counts(conn)
         flash_tickers = _recent_event_tickers(conn, since_ts) if since_ts is not None else set()
+        metadata = _market_metadata(conn)
 
         tickers = sorted(
             set(scores) | set(inventory) | set(programs) | set(books) | set(quotes)
@@ -270,9 +318,15 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
             daily_pool = None
             discount_factor = None
             target_size = None
+            total_reward = None
+            program_start = None
+            program_end = None
             if program is not None:
                 target_size = program["target_size"]
                 discount_factor = (program["discount_factor_bps"] or 0) / 10000.0
+                total_reward = program["period_reward"]
+                program_start = program["start_date"]
+                program_end = program["end_date"]
                 if program["days_remaining"]:
                     # Same "reward per day" heuristic incentive_screener.py
                     # already uses -- not a literal daily-reset figure.
@@ -290,19 +344,37 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
 
             risk_level = quote_row["risk_level"] if quote_row is not None else None
             quote = None
-            if quote_row is not None and quote_row["quote_yes_price"] is not None:
-                quote = {
-                    "yes_price": quote_row["quote_yes_price"],
-                    "yes_size": quote_row["quote_yes_size"],
-                    "no_price": quote_row["quote_no_price"],
-                    "no_size": quote_row["quote_no_size"],
-                }
+            crowding_ratio = None
+            risk_reason = None
+            if quote_row is not None:
+                crowding_ratio = quote_row["crowding_ratio"]
+                risk_reason = _risk_reason(
+                    risk_level,
+                    quote_row["volatility_level"],
+                    quote_row["inventory_level"],
+                    None if quote_row["news_signal"] is None else bool(quote_row["news_signal"]),
+                    None if quote_row["event_signal"] is None else bool(quote_row["event_signal"]),
+                )
+                if quote_row["quote_yes_price"] is not None:
+                    quote = {
+                        "yes_price": quote_row["quote_yes_price"],
+                        "yes_size": quote_row["quote_yes_size"],
+                        "no_price": quote_row["quote_no_price"],
+                        "no_size": quote_row["quote_no_size"],
+                    }
+
+            meta = metadata.get(ticker)
 
             markets.append({
                 "ticker": ticker,
+                "title": meta["title"] if meta is not None else None,
+                "subtitle": meta["subtitle"] if meta is not None else None,
                 "target_size": target_size,
                 "discount_factor": discount_factor,
                 "daily_pool": daily_pool,
+                "total_reward": total_reward,
+                "program_start": program_start,
+                "program_end": program_end,
                 "net_pnl": net_pnl,
                 "unrealized_pnl": unrealized_pnl,
                 "realized_pnl": realized_pnl,
@@ -313,6 +385,8 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
                 "qualifying_snapshots": qual["qualifying"],
                 "total_snapshots": qual["total"],
                 "risk_level": risk_level,
+                "risk_reason": risk_reason,
+                "crowding_ratio": crowding_ratio,  # our "competition level" proxy -- Kalshi doesn't publish one directly
                 "quote": quote,  # None if pulled (HIGH risk) or no data logged yet
                 "flash": ticker in flash_tickers,
                 "orderbook": {
@@ -366,6 +440,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
 
 if __name__ == "__main__":
+    # Structural protection against running two instances at once (see
+    # singleton_lock.py). The OS port bind already prevents true
+    # duplicates here, but this gives a clear error message instead of
+    # a raw "address already in use" and keeps the same protection
+    # pattern as main.py's run() -- called at process-start time, not
+    # module-import time, so this module can be imported (e.g. for unit
+    # tests, or by another process checking config) without contending
+    # with an already-running server for the lock.
+    acquire_singleton_lock("server", config.BASE_DIR)
     logger.info(
         "Starting dashboard server (READ-ONLY -- no orders can be placed) at http://127.0.0.1:8000"
     )

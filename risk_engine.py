@@ -42,6 +42,12 @@ class RiskEngine:
     news_signal: bool = False
     event_signal: bool = False
     risk_level: str = LOW
+    # Public breakdown of the LAST composite risk_level's inputs -- set
+    # every update(), so callers (main.py's scoring_loop, ultimately the
+    # dashboard) can explain WHY risk_level is what it is, not just show
+    # the final composite badge.
+    volatility_level: str = LOW
+    inventory_level: str = LOW
 
     def register_news_event(self, now: float | None = None) -> None:
         """
@@ -82,14 +88,14 @@ class RiskEngine:
 
         self.news_signal = self._news_active_until is not None and now < self._news_active_until
 
-        vol_level = self._volatility_level()
-        inv_level = self._inventory_level(inventory, max_inventory)
+        self.volatility_level = self._volatility_level()
+        self.inventory_level = self._inventory_level(inventory, max_inventory)
         # News hits and event-proximity both carry no direction/confidence
         # -- they only ever nudge risk up one notch (toward ELEVATED), never
         # straight to HIGH on their own.
         news_level = ELEVATED if self.news_signal else LOW
         event_level = ELEVATED if self.event_signal else LOW
-        composite = _max_severity(_max_severity(vol_level, inv_level), news_level)
+        composite = _max_severity(_max_severity(self.volatility_level, self.inventory_level), news_level)
         self.risk_level = _max_severity(composite, event_level)
 
     def _volatility_level(self) -> str:

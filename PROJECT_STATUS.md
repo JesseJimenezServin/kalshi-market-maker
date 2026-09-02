@@ -85,7 +85,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 39/39 passing
+- test_logic.py -- offline unit tests, no network required, 41/41 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -536,6 +536,46 @@ reward-density candidates checked).
   available in this environment) executing the actual render functions,
   not just a syntax check. Purely additive/visualization -- no
   simulation logic touched, re-verified via grep.
+- 2026-09-02 (completed): Dashboard now explains WHY a market's risk
+  level is what it is, shows its real name, and lists what Kalshi's
+  incentive program actually tells us about it. risk_engine.RiskEngine
+  gained public volatility_level/inventory_level attributes (alongside
+  the existing news_signal/event_signal) so main.py can log the full
+  breakdown, not just the composite badge; server.py's new
+  _risk_reason() attributes the composite to whichever factor(s) are
+  independently AT that same severity (e.g. an ELEVATED inventory_level
+  is correctly NOT cited as the cause of a HIGH reading driven by
+  volatility alone), and never cites news/event at HIGH, since
+  risk_engine.py only ever lets them nudge to ELEVATED. New
+  market_metadata table (one row per ticker, upserted, not a time
+  series) holds each market's real title/subtitle -- fetched once via
+  rest_client.get_market when a ticker starts being watched (main.py's
+  new fetch_market_metadata(), called from run() and again from
+  market_switch_loop for a switched-into replacement), not on a
+  recurring poll, since titles are effectively static. quote_snapshots
+  gained a crowding_ratio column (our "competition level" proxy --
+  Kalshi doesn't publish one directly; reuses market_switcher.
+  compute_crowding_ratio, now also computed every scoring_loop tick, not
+  just inside market_switch_loop's own periodic check).
+  incentive_program_snapshots gained start_date/end_date columns (the
+  program's real window, not derivable from days_remaining/
+  total_period_days alone at a single point in time). Watched Markets
+  table gained Market (title, ticker as subtext), Competition, Total
+  Reward ($), and Program Window columns, plus a plain-English reason
+  line under the Risk badge. Also fixed, while adding this: server.py
+  was acquiring the process singleton lock at IMPORT time (inconsistent
+  with main.py's own pattern of acquiring it inside run()), which meant
+  server.py's pure helper functions couldn't be safely unit-tested (or
+  even imported) while the real dashboard was running -- moved the lock
+  acquisition into `if __name__ == "__main__":`. 2 new tests
+  (RiskEngine's exposed breakdown, _risk_reason's attribution logic
+  including the "don't blame the wrong factor" and "never blame news/
+  event for HIGH" cases); 41/41 passing. Verified end-to-end against a
+  real live payload (real market titles, real program dates, and a
+  live ELEVATED reading correctly attributed to "recent news" matching
+  an actual concurrent news_events hit) via a Node harness executing
+  the actual render functions. Re-verified via grep that no
+  order-placing code exists anywhere.
 
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks
