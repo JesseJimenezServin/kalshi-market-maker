@@ -45,6 +45,10 @@ sustained data-collection window.
   over /ws once per second, never talks to Kalshi
 - templates/dashboard.html -- single-page dashboard UI (markets table,
   order book depth bars, recent fills, performance chart)
+- analysis.py -- read-only report: ESTIMATED dollar reward per ticker
+  (snapshot_scores joined against incentive_program_snapshots) printed
+  alongside real adverse-selection P&L from inventory_marks. No simulated
+  cash balance -- P&L is already tracked correctly in cents.
 - test_logic.py -- offline unit tests, no network required, 14/14 passing
 
 ## Completed milestones
@@ -101,8 +105,29 @@ sustained data-collection window.
   request-response parsing in news_feed.py has not been exercised
   against a live call -- verify field names on your own machine before
   trusting this signal.
+- 2026-09-01 (completed): Added analysis.py -- prints an ESTIMATED dollar
+  reward per watched ticker (avg combined_score x period_reward x
+  fraction of "clean" snapshots where both sides qualified) alongside the
+  real, already-tracked-in-cents realized/unrealized P&L from
+  inventory_marks, so both sides of "does reward beat adverse selection"
+  are visible together. Deliberately did NOT add a simulated cash
+  balance -- P&L is already correct in cents; a balance would be
+  redundant, not new information. The reward figure is an explicit
+  optimistic-upper-bound ESTIMATE (see "Known simplifications" below),
+  not a guaranteed number -- does not change any simulation logic, purely
+  reads existing SQLite tables.
 
 ## Known simplifications / open items
+- analysis.py's estimated dollar reward is an OPTIMISTIC UPPER BOUND, not
+  a guaranteed figure: it assumes no double-counting with other
+  participants resting at our exact quoted price (same simplification as
+  reward_simulator.py's my_share estimate), and assumes the Time Period
+  Score aggregates as a simple average of snapshot scores over however
+  much of the window we've collected so far -- unverified against
+  Kalshi's real methodology, and it does NOT scale down for elapsed time
+  vs. the full program period (period_reward is the full-period pool;
+  our average score so far may only reflect a few hours of a
+  multi-day period).
 - News-awareness signal is zero-cost (GDELT + keyword heuristic, no LLM
   classification, no paid APIs). Quality is a known limitation vs. a
   true NLP/LLM classifier -- expect false positives/negatives; flagged as

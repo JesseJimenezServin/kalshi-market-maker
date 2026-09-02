@@ -39,7 +39,7 @@ logging.basicConfig(
 import config
 from auth import KalshiSigner
 from rest_client import KalshiRestClient
-from orderbook import OrderbookManager
+from orderbook import OrderbookManager, dollars_to_cents, fp_to_size
 from ws_client import KalshiWebSocketClient
 from incentive_screener import ScreenedProgram, screen_incentive_programs, print_report
 from reward_simulator import score_both_sides
@@ -215,7 +215,10 @@ async def incentive_refresh_loop(
 ) -> None:
     while True:
         try:
-            results = screen_incentive_programs(rest_client)
+            # screen_incentive_programs makes blocking `requests` calls;
+            # run it off the event loop so it doesn't freeze the WebSocket
+            # connection / scoring_loop for however long the HTTP call takes.
+            results = await asyncio.to_thread(screen_incentive_programs, rest_client)
             logger.info("Incentive screen refreshed: %d active liquidity programs found", len(results))
             print_report(results)
             for program in results:
@@ -243,11 +246,23 @@ def make_trade_handler(
         if state is None or state.quote is None:
             return
 
-        trade_yes_price = trade_msg.get("yes_price")
-        trade_count = trade_msg.get("count", 0)
+        # Kalshi's real trade fields are "yes_price_dollars" (dollar string)
+        # and "count_fp" (fractional-capable "_fp" string) -- confirmed via
+        # a live REST /markets/trades response 2026-09-01. Falling back to
+        # the originally-assumed plain "yes_price"/"count" names too, in
+        # case the WS trade message differs from the REST trade record.
+        raw_price = trade_msg.get("yes_price_dollars", trade_msg.get("yes_price"))
+        raw_count = trade_msg.get("count_fp", trade_msg.get("count", 0))
         taker_side = trade_msg.get("taker_side")
-        if trade_yes_price is None or not trade_count or taker_side is None:
+        if raw_price is None or not raw_count or taker_side is None:
+            # Unlike a missing book side (routine), this means NEITHER of
+            # our guessed field-name variants matched -- log loudly so a
+            # long unattended run doesn't silently never simulate a fill.
+            logger.error("%s: unrecognized trade message shape, skipping -- raw message: %s", ticker, trade_msg)
             return
+
+        trade_yes_price = dollars_to_cents(raw_price) if isinstance(raw_price, str) else raw_price
+        trade_count = fp_to_size(raw_count) if isinstance(raw_count, str) else raw_count
 
         book = orderbook_manager.books.get(ticker)
         if book is None:

@@ -196,8 +196,14 @@ async def news_refresh_loop(
     while True:
         for ticker, state in states.items():
             try:
-                keywords = _market_keywords(rest_client, ticker)
-                articles = fetch_recent_articles(keywords, config.NEWS_LOOKBACK_HOURS)
+                # _market_keywords/fetch_recent_articles make blocking
+                # `requests` calls (to Kalshi and GDELT respectively); run
+                # them off the event loop so they don't freeze the
+                # WebSocket connection / scoring_loop while waiting on a
+                # slow or unreachable GDELT (each ticker can block up to
+                # its 10s connect timeout otherwise).
+                keywords = await asyncio.to_thread(_market_keywords, rest_client, ticker)
+                articles = await asyncio.to_thread(fetch_recent_articles, keywords, config.NEWS_LOOKBACK_HOURS)
                 for article in articles:
                     score = score_relevance(keywords, article)
                     if score >= config.NEWS_RELEVANCE_THRESHOLD:

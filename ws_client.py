@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 from typing import Awaitable, Callable
 
+import certifi
 import websockets
 
 import config
@@ -29,6 +31,15 @@ from orderbook import OrderbookManager
 logger = logging.getLogger(__name__)
 
 _WS_PATH = "/trade-api/ws/v2"
+
+# `websockets` builds its own TLS context via the `ssl` module's default
+# trust store, which (unlike `requests`/urllib3) does NOT automatically use
+# certifi's bundle. On python.org's macOS builds this default store is
+# frequently missing root CAs ("unable to get local issuer certificate"),
+# so the handshake fails even though plain `requests` calls to the same
+# Kalshi API work fine. Building the context from certifi explicitly fixes
+# this regardless of the local Python install's certificate configuration.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 TradeHandler = Callable[[dict], Awaitable[None]]
 
@@ -49,6 +60,13 @@ class KalshiWebSocketClient:
         self.on_trade = on_trade
         self._cmd_id = 0
         self._ws = None
+        self._orderbook_delta_sid: int | None = None
+        # Tickers with a resync already requested but not yet answered by a
+        # fresh snapshot -- avoids firing a new get_snapshot request on
+        # every single delta that arrives while still stale (confirmed live
+        # 2026-09-01: without this, a busy market can trigger several
+        # redundant resync requests within milliseconds of each other).
+        self._resync_pending: set[str] = set()
 
     def _next_id(self) -> int:
         self._cmd_id += 1
@@ -73,17 +91,30 @@ class KalshiWebSocketClient:
 
     async def _request_resync(self, ws, ticker: str) -> None:
         """Ask for a fresh snapshot on an existing subscription without
-        dropping it (per the April 2026 get_snapshot addition)."""
+        dropping it (per the April 2026 get_snapshot addition).
+
+        CONFIRMED live 2026-09-01: this requires "sid" identifying which
+        subscription to update -- omitting it fails with Kalshi error code
+        12 ("Exactly one subscription ID is required"). We only learn the
+        sid from the "subscribed" confirmation after _subscribe() sends,
+        so skip (log + retry will naturally happen on the next stale
+        delta) if we haven't seen it yet.
+        """
+        if self._orderbook_delta_sid is None:
+            logger.warning("%s: can't request resync yet, no orderbook_delta sid seen", ticker)
+            return
+
         msg = {
             "id": self._next_id(),
             "cmd": "update_subscription",
             "params": {
-                "channels": ["orderbook_delta"],
+                "sid": self._orderbook_delta_sid,
                 "market_tickers": [ticker],
                 "action": "get_snapshot",
             },
         }
         await ws.send(json.dumps(msg))
+        self._resync_pending.add(ticker)
         logger.info("%s: requested resync snapshot", ticker)
 
     async def run_forever(self) -> None:
@@ -99,7 +130,7 @@ class KalshiWebSocketClient:
 
     async def _run_once(self) -> None:
         headers = self._auth_headers()
-        async with websockets.connect(self.ws_url, additional_headers=headers) as ws:
+        async with websockets.connect(self.ws_url, additional_headers=headers, ssl=_SSL_CONTEXT) as ws:
             self._ws = ws
             await self._subscribe(ws)
 
@@ -113,10 +144,15 @@ class KalshiWebSocketClient:
         if msg_type in ("orderbook_snapshot", "orderbook_delta"):
             self.orderbook_manager.handle_message(msg)
 
-            if msg_type == "orderbook_delta":
-                body = msg.get("msg", {})
-                ticker = body.get("market_ticker")
-                if ticker and self.orderbook_manager.needs_resync(ticker):
+            body = msg.get("msg", {})
+            ticker = body.get("market_ticker")
+
+            if msg_type == "orderbook_snapshot" and ticker:
+                # A fresh snapshot answers any outstanding resync request.
+                self._resync_pending.discard(ticker)
+
+            elif msg_type == "orderbook_delta" and ticker:
+                if self.orderbook_manager.needs_resync(ticker) and ticker not in self._resync_pending:
                     await self._request_resync(ws, ticker)
 
         elif msg_type == "trade":
@@ -128,6 +164,10 @@ class KalshiWebSocketClient:
 
         elif msg_type == "subscribed":
             logger.info("Subscription confirmed: %s", msg)
+            channel = msg.get("msg", {}).get("channel")
+            sid = msg.get("msg", {}).get("sid")
+            if channel == "orderbook_delta" and sid is not None:
+                self._orderbook_delta_sid = sid
 
         else:
             logger.debug("Unhandled message type=%s: %s", msg_type, msg)

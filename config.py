@@ -62,8 +62,21 @@ def is_read_only_mode() -> bool:
 # based on live incentive-program data -- but Phase 0 starts manual/explicit
 # so we can sanity-check everything by hand.
 WATCHED_MARKET_TICKERS: list[str] = [
-    # Fill in with real tickers once you've identified live incentivized
-    # markets via the screener, e.g. "KXHIGHNY-25AUG30-B75"
+    # Picked 2026-09-01 via incentive_screener.py against prod, favoring
+    # low near-term volatility per the strategy notes below:
+    "KXEOWEEK-26AUG22-0",            # exec-order count for a week already past -- likely near-settled
+    "KXCITYCHAMPS-MIA30JUL01HDMP-2",  # Miami teams 2+ championships by 2030 -- multi-year horizon
+    "KXNFLSTADIUM-28SEP01EVERBRENO-Y",  # Jacksonville stadium renovation before 2028 -- slow-moving fact
+
+    # TEMPORARY stress-test addition (2026-09-01), NOT part of the quiet-
+    # market thesis test above -- added deliberately to force real deltas/
+    # trades/risk-escalation quickly (has an active incentive program AND
+    # real volume -- a weather market was tried first but had no active
+    # incentive program, so it wouldn't have exercised scoring_loop/
+    # RiskEngine/quoting_policy at all, only orderbook parsing) so we can
+    # confirm the full pipeline under real activity before the long
+    # unattended run. Remove once confirmed working.
+    "KXMLBPLAYOFFS-26-SD",  # Pro Baseball Playoff Qualifiers (San Diego) -- moves with live games
 ]
 
 # How often to poll REST endpoints that don't have a WebSocket equivalent
@@ -86,7 +99,15 @@ DEFAULT_SIMULATED_QUOTE_SIZE = 100  # contracts, per side
 # hypothetical inventory (in contracts) we allow the simulator to accumulate
 # per market before it assumes we'd have pulled quotes. This should match
 # whatever position limit you'd actually run live in Phase 1.
-MAX_SIMULATED_INVENTORY = 500
+#
+# Set 2026-09-01 to represent a ~$1000 pretend bankroll spread across the 3
+# watched markets (333/market). This is a rough, CONSERVATIVE proxy, not an
+# exact dollar figure: contracts are priced 1-99 cents and a single
+# contract's max payout/loss is $1, so "contract count" only equals actual
+# dollars at risk in the worst case where every contract simultaneously
+# moves against us at $1 -- real dollar exposure at any given moment is
+# typically much less than contract_count * $1.
+MAX_SIMULATED_INVENTORY = 333
 
 # --------------------------------------------------------------------------
 # Active strategy simulation: risk engine + quoting policy

@@ -18,32 +18,72 @@ import config
 
 
 def test_orderbook_snapshot_and_delta():
+    # Shape CONFIRMED live 2026-09-01: sid/seq top-level, price/size as
+    # "_dollars_fp" decimal-string pairs. See orderbook.py's handle_message.
     mgr = OrderbookManager()
     mgr.handle_message({
         "type": "orderbook_snapshot",
-        "msg": {"market_ticker": "TEST", "sid": 1, "seq": 100,
-                 "yes": [[45, 200], [44, 150]], "no": [[40, 300], [39, 100]]},
+        "sid": 1,
+        "seq": 100,
+        "msg": {
+            "market_ticker": "TEST",
+            "yes_dollars_fp": [["0.4500", "200.00"], ["0.4400", "150.00"]],
+            "no_dollars_fp": [["0.4000", "300.00"], ["0.3900", "100.00"]],
+        },
     })
     book = mgr.books["TEST"]
     assert not book.stale
-    assert book.best_yes_bid() == (45, 200)
-    assert book.best_no_bid() == (40, 300)
+    assert book.best_yes_bid() == (45, 200.0)
+    assert book.best_no_bid() == (40, 300.0)
 
-    # clean delta
+    # clean delta (best-effort inferred field names -- not yet confirmed
+    # against a live delta message, see orderbook.py's docstring)
     mgr.handle_message({
         "type": "orderbook_delta",
-        "msg": {"market_ticker": "TEST", "sid": 1, "seq": 101, "side": "yes", "price": 45, "delta": 50},
+        "sid": 1,
+        "seq": 101,
+        "msg": {"market_ticker": "TEST", "side": "yes", "price_dollars": "0.4500", "delta_fp": "50.00"},
     })
-    assert book.yes_levels[45] == 250
+    assert book.yes_levels[45] == 250.0
     assert not book.stale
 
     # gap -> should mark stale
     mgr.handle_message({
         "type": "orderbook_delta",
-        "msg": {"market_ticker": "TEST", "sid": 1, "seq": 105, "side": "yes", "price": 45, "delta": 10},
+        "sid": 1,
+        "seq": 105,
+        "msg": {"market_ticker": "TEST", "side": "yes", "price_dollars": "0.4500", "delta_fp": "10.00"},
     })
     assert book.stale, "expected sequence gap to mark book stale"
     print("test_orderbook_snapshot_and_delta: PASS")
+
+
+def test_orderbook_delta_unrecognized_shape_marks_stale_not_crash():
+    mgr = OrderbookManager()
+    mgr.handle_message({
+        "type": "orderbook_snapshot",
+        "sid": 1,
+        "seq": 1,
+        "msg": {
+            "market_ticker": "TEST2",
+            "yes_dollars_fp": [["0.5000", "100.00"]],
+            "no_dollars_fp": [["0.4800", "100.00"]],
+        },
+    })
+    book = mgr.books["TEST2"]
+    assert not book.stale
+
+    # If a real delta doesn't match our best-effort field-name guess, this
+    # must be logged and the book marked stale (triggering a resync) --
+    # NOT an unhandled crash that kills the whole WebSocket session.
+    mgr.handle_message({
+        "type": "orderbook_delta",
+        "sid": 1,
+        "seq": 2,
+        "msg": {"market_ticker": "TEST2", "totally_unexpected_field": 123},
+    })
+    assert book.stale, "expected unrecognized delta shape to mark book stale, not crash"
+    print("test_orderbook_delta_unrecognized_shape_marks_stale_not_crash: PASS")
 
 
 def test_reference_price():
@@ -306,6 +346,7 @@ def test_risk_engine_news_signal_escalates_then_decays():
 
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
+    test_orderbook_delta_unrecognized_shape_marks_stale_not_crash()
     test_reference_price()
     test_score_hypothetical_order_qualifies_and_shares_correctly()
     test_score_hypothetical_order_fails_target()

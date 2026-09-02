@@ -76,7 +76,11 @@ def screen_incentive_programs(
                 continue
 
             target_size = float(p.get("target_size_fp", 0) or 0)
-            period_reward = float(p.get("period_reward", 0) or 0)
+            # period_reward comes back as an integer in CENTS (confirmed via
+            # a live raw response: period_reward=1350000 for a market whose
+            # actual pool is $13,500 -- matches Kalshi's price-in-cents
+            # convention used everywhere else in this API), not dollars.
+            period_reward = float(p.get("period_reward", 0) or 0) / 100.0
             discount_factor_bps = int(p.get("discount_factor_bps", 0) or 0)
 
             score = _reward_density(period_reward, target_size, days_remaining)
