@@ -1,5 +1,8 @@
 # Kalshi Liquidity Lab -- Project Status
 
+git identity configured for contribution tracking (2026-09-02): repo-level
+user.name/user.email set to JesseJimenezServin / nuvusbusiness@gmail.com.
+
 ## Purpose
 Paper-trade (zero capital risk) the Kalshi Liquidity Incentive Program to
 determine whether a basic two-sided quoting strategy earns more in reward
