@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 # Configured before the imports below so that any import-time log lines
 # (e.g. rest_client's read-only-mode startup notice) are actually emitted
@@ -49,7 +50,7 @@ from logger import SimulationLogger
 import quoting_policy
 from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
-from event_calendar import event_refresh_loop
+from event_calendar import event_refresh_loop, hours_until_close
 from singleton_lock import acquire_singleton_lock
 from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement
 
@@ -80,6 +81,11 @@ class MarketRuntimeState:
         self.inventory = InventoryState(ticker=ticker)
         self.risk_engine = RiskEngine(ticker=ticker)
         self.quote: HypotheticalQuote | None = None  # set once we have book data
+        # Cached by event_calendar.event_refresh_loop; static once fetched,
+        # so scoring_loop can compute minutes_until_close fresh every tick
+        # (for take-profit time-decay / the pre-resolution forced exit --
+        # see quoting_policy.py) without an extra network call per tick.
+        self.close_time: datetime | None = None
 
 
 def build_market_states(
@@ -191,6 +197,13 @@ async def scoring_loop(
 
             state.risk_engine.update(mid, state.inventory, state.max_inventory)
 
+            # Computed fresh every tick from the cached close_time (see
+            # event_calendar.event_refresh_loop) -- no extra network call,
+            # since close_time itself is static once fetched.
+            minutes_until_close = (
+                hours_until_close(state.close_time) * 60.0 if state.close_time is not None else None
+            )
+
             state.quote = quoting_policy.compute_quote(
                 book,
                 state.risk_engine.risk_level,
@@ -198,6 +211,7 @@ async def scoring_loop(
                 config.DEFAULT_SIMULATED_QUOTE_SIZE,
                 state.max_inventory,
                 state.target_size,
+                minutes_until_close=minutes_until_close,
             )
 
             # Pure instrumentation for the dashboard (server.py) -- main.py
@@ -226,9 +240,32 @@ async def scoring_loop(
                 state.risk_engine.risk_level,
                 state.max_inventory,
                 config.HARD_STOP_INVENTORY_FRACTION,
+                order_size=config.DEFAULT_SIMULATED_QUOTE_SIZE,
+                min_buffer=config.HARD_STOP_MIN_BUFFER_CONTRACTS,
             )
             if fill is not None:
                 sim_logger.log_simulated_stop_loss(ticker=ticker, **fill)
+                logger.warning(
+                    "%s: HIGH-risk hard stop fired (%s %d @ %dc, net %d -> %d)",
+                    ticker, fill["side"], fill["size"], fill["price"],
+                    fill["net_yes_contracts_before"], fill["net_yes_contracts_after"],
+                )
+            else:
+                # Independent of risk_level -- only checked when the
+                # hard stop above didn't already flatten us this tick
+                # (flatten_position is a no-op on an already-flat
+                # position anyway, but skipping avoids a redundant call).
+                time_exit_fill = quoting_policy.maybe_execute_time_based_exit(
+                    book, state.inventory, minutes_until_close, state.max_inventory, config.CRITICAL_EXIT_MINUTES,
+                )
+                if time_exit_fill is not None:
+                    sim_logger.log_simulated_stop_loss(ticker=ticker, **time_exit_fill)
+                    logger.warning(
+                        "%s: pre-resolution flatten fired (%s %d @ %dc, %.1f min to close, net %d -> %d)",
+                        ticker, time_exit_fill["side"], time_exit_fill["size"], time_exit_fill["price"],
+                        minutes_until_close,
+                        time_exit_fill["net_yes_contracts_before"], time_exit_fill["net_yes_contracts_after"],
+                    )
 
             if state.quote is not None:
                 yes_result, no_result = score_both_sides(
@@ -452,6 +489,13 @@ def make_trade_handler(
             book, state.quote, trade_yes_price, taker_side
         )
 
+        # Captured before mutation so classify_fill_exit_reason (below)
+        # can tell whether this fill reduced an EXISTING position at a
+        # profitable price (take-profit exit) vs. accumulated further,
+        # purely for logging -- doesn't affect the fill itself.
+        prior_net = state.inventory.net_yes_contracts
+        prior_avg_entry = state.inventory.avg_entry_price
+
         process_trade_for_inventory(
             inventory=state.inventory,
             quote=state.quote,
@@ -461,12 +505,21 @@ def make_trade_handler(
             my_share_at_price=my_share_estimate,
             max_inventory=state.max_inventory,
         )
+
+        fill_side = "yes" if taker_side == "no" else "no"
+        fill_price = trade_yes_price if taker_side == "no" else (100 - trade_yes_price)
+        exit_reason = quoting_policy.classify_fill_exit_reason(
+            prior_net, prior_avg_entry, fill_side, fill_price, config.TAKE_PROFIT_MARGIN_CENTS,
+        )
         sim_logger.log_simulated_fill(
             ticker=ticker,
-            side="yes" if taker_side == "no" else "no",
-            price=trade_yes_price if taker_side == "no" else (100 - trade_yes_price),
+            side=fill_side,
+            price=fill_price,
             size=round(trade_count * my_share_estimate),
+            exit_reason=exit_reason,
         )
+        if exit_reason == "take_profit_exit":
+            logger.info("%s: take-profit exit fill (%s %d @ %dc)", ticker, fill_side, round(trade_count * my_share_estimate), fill_price)
 
     return on_trade
 

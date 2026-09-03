@@ -15,7 +15,13 @@ from adverse_selection_sim import InventoryState, HypotheticalQuote, process_tra
 from incentive_screener import ScreenedProgram
 from main import build_market_states, compute_my_share_at_touched_price
 from risk_engine import RiskEngine, LOW, ELEVATED, HIGH
-from quoting_policy import compute_quote, maybe_execute_stop_loss
+from quoting_policy import (
+    compute_quote,
+    maybe_execute_stop_loss,
+    maybe_execute_time_based_exit,
+    effective_take_profit_margin,
+    classify_fill_exit_reason,
+)
 from news_feed import score_relevance, is_relevant, derive_keywords, _parse_articles, _build_news_query
 from market_switcher import MarketSwitcher, compute_crowding_ratio
 from event_calendar import hours_until_close
@@ -370,6 +376,136 @@ def test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise():
     assert maybe_execute_stop_loss(book, inv3, risk_level=HIGH, max_inventory=500, hard_stop_fraction=0.8) is None
     assert inv3.net_yes_contracts == 100
     print("test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise: PASS")
+
+
+def test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations():
+    # A $150 max_inventory market with a 100-contract quote size: the
+    # pure-fraction threshold (0.8 * 150 = 120) would fire after barely
+    # more than a single fill. The refined threshold --
+    # max(120, order_size + min_buffer) = max(120, 100+50=150) = 150 --
+    # must NOT fire at 120, only once inventory actually reaches 150.
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 200]], no=[[48, 200]])
+
+    inv = InventoryState(ticker="TEST", net_yes_contracts=120, avg_entry_price=45.0)
+    assert maybe_execute_stop_loss(
+        book, inv, risk_level=HIGH, max_inventory=150, hard_stop_fraction=0.8,
+        order_size=100, min_buffer=50,
+    ) is None, "must not fire at the old 80%-of-cap point once the refined floor is higher"
+    assert inv.net_yes_contracts == 120
+
+    inv2 = InventoryState(ticker="TEST", net_yes_contracts=150, avg_entry_price=45.0)
+    fill = maybe_execute_stop_loss(
+        book, inv2, risk_level=HIGH, max_inventory=150, hard_stop_fraction=0.8,
+        order_size=100, min_buffer=50,
+    )
+    assert fill is not None, "must fire once inventory reaches the refined (higher) floor"
+
+    # A LARGE max_inventory market: the fraction term dominates and the
+    # refined threshold reduces to the original behavior -- unaffected.
+    inv3 = InventoryState(ticker="TEST", net_yes_contracts=420, avg_entry_price=45.0)
+    fill3 = maybe_execute_stop_loss(
+        book, inv3, risk_level=HIGH, max_inventory=500, hard_stop_fraction=0.8,
+        order_size=100, min_buffer=50,
+    )
+    assert fill3 is not None, "large max_inventory should still fire at 80% (420/500), unaffected by the buffer"
+    print("test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations: PASS")
+
+
+def test_maybe_execute_time_based_exit_fires_below_critical_and_not_above():
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 200]], no=[[48, 200]])
+
+    # Well above the critical window -> no fire, regardless of risk level
+    # (this trigger is time-driven, not risk-driven).
+    inv = InventoryState(ticker="TEST", net_yes_contracts=50, avg_entry_price=45.0)
+    assert maybe_execute_time_based_exit(book, inv, minutes_until_close=60.0, max_inventory=500, critical_minutes=15) is None
+    assert inv.net_yes_contracts == 50
+
+    # At/below the critical threshold -> forced flatten.
+    fill = maybe_execute_time_based_exit(book, inv, minutes_until_close=10.0, max_inventory=500, critical_minutes=15)
+    assert fill is not None
+    assert fill["reason"] == "pre_resolution_flatten"
+    assert inv.net_yes_contracts == 0
+
+    # Unknown or already-past-close (negative) -> no fire.
+    inv2 = InventoryState(ticker="TEST", net_yes_contracts=50, avg_entry_price=45.0)
+    assert maybe_execute_time_based_exit(book, inv2, minutes_until_close=None, max_inventory=500, critical_minutes=15) is None
+    assert maybe_execute_time_based_exit(book, inv2, minutes_until_close=-5.0, max_inventory=500, critical_minutes=15) is None
+    print("test_maybe_execute_time_based_exit_fires_below_critical_and_not_above: PASS")
+
+
+def test_effective_take_profit_margin_decays_with_time_and_hits_zero_at_critical():
+    full, window, critical = 4.0, 60.0, 15.0
+
+    # Outside the window (or unknown / already past close) -> full margin.
+    assert effective_take_profit_margin(120.0, full, window, critical) == full
+    assert effective_take_profit_margin(None, full, window, critical) == full
+    assert effective_take_profit_margin(-5.0, full, window, critical) == full
+
+    # At the window's outer edge -> full margin; at/below critical -> 0;
+    # halfway through the decay span -> half the margin.
+    assert abs(effective_take_profit_margin(window, full, window, critical) - full) < 1e-9
+    assert effective_take_profit_margin(critical, full, window, critical) == 0.0
+    assert effective_take_profit_margin(5.0, full, window, critical) == 0.0
+    midpoint = critical + (window - critical) / 2
+    assert abs(effective_take_profit_margin(midpoint, full, window, critical) - full / 2) < 1e-9
+    print("test_effective_take_profit_margin_decays_with_time_and_hits_zero_at_critical: PASS")
+
+
+def test_compute_quote_applies_take_profit_floor_on_exit_side():
+    # target_size=100 -> reference price == touch (50/48) on both sides
+    # here, so the pre-skew base quote is just the touch.
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 500]], no=[[48, 500]])
+
+    # Fully at cap (net_yes_contracts == max_inventory) -> skew is
+    # capped at MAX_INVENTORY_SKEW_TICKS (5), pushing no_price from the
+    # touch (48) up to 53. Off a 46c entry, that's only 1c of profit
+    # (100-53=47, 47-46=1) -- well under the 4c margin -- so the
+    # take-profit floor must cap it back down to 100-(46+4)=50.
+    inv = InventoryState(ticker="TEST", net_yes_contracts=100, avg_entry_price=46.0)
+    quote = compute_quote(book, LOW, inv, base_size=100, max_inventory=100, target_size=100)
+    assert quote is not None
+    assert quote.no_price == 50, quote.no_price  # capped, not the naturally-skewed 53
+
+    # Same skew (no_price naturally 53), but a lower entry price (40c)
+    # where even the fully-skewed price already clears the margin
+    # (100-53=47, 47-40=7 >= 4) -- take-profit should be a no-op.
+    inv2 = InventoryState(ticker="TEST", net_yes_contracts=100, avg_entry_price=40.0)
+    quote2 = compute_quote(book, LOW, inv2, base_size=100, max_inventory=100, target_size=100)
+    assert quote2 is not None
+    assert quote2.no_price == 53, quote2.no_price  # unconstrained by take-profit
+
+    # Flat inventory -> no take-profit floor applied at all (nothing to
+    # take profit on); quote is just the touch, unaffected by avg_entry_price.
+    flat_inv = InventoryState(ticker="TEST", net_yes_contracts=0, avg_entry_price=0.0)
+    flat_quote = compute_quote(book, LOW, flat_inv, base_size=100, max_inventory=100, target_size=100)
+    assert flat_quote.no_price == 48, flat_quote.no_price
+    print("test_compute_quote_applies_take_profit_floor_on_exit_side: PASS")
+
+
+def test_classify_fill_exit_reason():
+    # Flat to start -> never an exit, regardless of side/price.
+    assert classify_fill_exit_reason(0, 0.0, "no", 52, 4.0) is None
+
+    # Long yes, entry-side fill (more YES) -> not an exit.
+    assert classify_fill_exit_reason(50, 44.0, "yes", 44, 4.0) is None
+
+    # Long yes, exit-side (NO) fill at 52c -> equiv yes-sell 48, exactly
+    # the 4c margin off a 44 entry -> take_profit_exit.
+    assert classify_fill_exit_reason(50, 44.0, "no", 52, 4.0) == "take_profit_exit"
+
+    # Long yes, exit-side (NO) fill at 55c -> equiv yes-sell 45, only 1c
+    # of profit off a 44 entry -- below the 4c margin.
+    assert classify_fill_exit_reason(50, 44.0, "no", 55, 4.0) == "exit"
+
+    # Short yes (long no), exit-side (YES) fill at 40c, entry 46c -> 6c
+    # profit, meets margin.
+    assert classify_fill_exit_reason(-50, 46.0, "yes", 40, 4.0) == "take_profit_exit"
+    # Short yes, exit fill at 44c -> only 2c profit, below margin.
+    assert classify_fill_exit_reason(-50, 46.0, "yes", 44, 4.0) == "exit"
+    print("test_classify_fill_exit_reason: PASS")
 
 
 def test_score_relevance_keyword_overlap():
@@ -971,6 +1107,11 @@ if __name__ == "__main__":
     test_compute_quote_rests_at_reference_price_not_touch_when_they_differ()
     test_risk_engine_escalates_to_high_on_volatile_mid()
     test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
+    test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations()
+    test_maybe_execute_time_based_exit_fires_below_critical_and_not_above()
+    test_effective_take_profit_margin_decays_with_time_and_hits_zero_at_critical()
+    test_compute_quote_applies_take_profit_floor_on_exit_side()
+    test_classify_fill_exit_reason()
     test_score_relevance_keyword_overlap()
     test_risk_engine_news_signal_escalates_then_decays()
     test_compute_crowding_ratio()

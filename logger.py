@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS simulated_fills (
     ticker TEXT NOT NULL,
     side TEXT NOT NULL,
     price INTEGER NOT NULL,
-    size INTEGER NOT NULL
+    size INTEGER NOT NULL,
+    exit_reason TEXT  -- NULL (entry/accumulating), "take_profit_exit", or
+                      -- "exit" (reduced inventory below full margin, e.g.
+                      -- during the pre-resolution time-decay window) --
+                      -- see quoting_policy.classify_fill_exit_reason
 );
 
 CREATE TABLE IF NOT EXISTS inventory_marks (
@@ -207,6 +211,10 @@ class SimulationLogger:
             if col not in quote_cols:
                 conn.execute(f"ALTER TABLE quote_snapshots ADD COLUMN {col} {coltype}")
 
+        fills_cols = {row[1] for row in conn.execute("PRAGMA table_info(simulated_fills)")}
+        if "exit_reason" not in fills_cols:
+            conn.execute("ALTER TABLE simulated_fills ADD COLUMN exit_reason TEXT")
+
     def log_snapshot_score(
         self,
         ticker: str,
@@ -237,11 +245,19 @@ class SimulationLogger:
                 ),
             )
 
-    def log_simulated_fill(self, ticker: str, side: str, price: int, size: int, ts: float | None = None) -> None:
+    def log_simulated_fill(
+        self,
+        ticker: str,
+        side: str,
+        price: int,
+        size: int,
+        exit_reason: str | None = None,
+        ts: float | None = None,
+    ) -> None:
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO simulated_fills (ts, ticker, side, price, size) VALUES (?, ?, ?, ?, ?)",
-                (ts or time.time(), ticker, side, price, size),
+                "INSERT INTO simulated_fills (ts, ticker, side, price, size, exit_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                (ts or time.time(), ticker, side, price, size, exit_reason),
             )
 
     def log_inventory_mark(

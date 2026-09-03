@@ -1,11 +1,23 @@
 """
 Active quoting policy: replaces the naive touch-joining rule that used to
 live in MarketRuntimeState.refresh_quote_from_book with one that reacts to
-realized volatility and hypothetical inventory (risk_engine.py). Still
-fully read-only/paper-trading -- compute_quote only returns a
-HypotheticalQuote (or None); maybe_execute_stop_loss only mutates the
-in-memory InventoryState passed to it. Neither function ever calls into
-rest_client.py/ws_client.py or issues any network request.
+realized volatility and hypothetical inventory (risk_engine.py), and
+proactively manages an open position rather than just holding it until an
+emergency hard stop:
+  - compute_quote applies a passive take-profit floor to the exit side of
+    the quote once inventory exists (see effective_take_profit_margin /
+    _apply_take_profit), relaxed as a market's resolution nears.
+  - maybe_execute_stop_loss actively flattens at a HIGH risk_level, using
+    a contract-count threshold refined for small max_inventory
+    allocations, not a pure fraction.
+  - maybe_execute_time_based_exit actively flattens once a market is
+    within config.CRITICAL_EXIT_MINUTES of its real close/resolution
+    time, regardless of risk_level.
+Still fully read-only/paper-trading -- compute_quote only returns a
+HypotheticalQuote (or None); the two maybe_execute_* functions only
+mutate the in-memory InventoryState passed to them. Nothing in this
+module ever calls into rest_client.py/ws_client.py or issues any
+network request.
 """
 
 from __future__ import annotations
@@ -23,6 +35,98 @@ def _clamp_price(price: int) -> int:
     return max(1, min(99, price))
 
 
+def effective_take_profit_margin(
+    minutes_until_close: float | None,
+    full_margin_cents: float,
+    window_minutes: float,
+    critical_minutes: float,
+) -> float:
+    """
+    full_margin_cents outside the pre-resolution window (or if
+    minutes_until_close is unknown, or the market is already past its
+    close -- settled/near-settled is safe, not risky, matching the same
+    convention used elsewhere, e.g. risk_engine.set_event_proximity).
+    Linearly relaxed toward 0 as minutes_until_close falls from
+    window_minutes to critical_minutes; exactly 0 at/below
+    critical_minutes -- any exit fill is accepted at that point, even at
+    a loss. The ACTIVE flatten in maybe_execute_time_based_exit is what
+    actually forces the position closed if a passive fill hasn't
+    happened by then.
+    """
+    if (
+        minutes_until_close is None
+        or minutes_until_close < 0
+        or minutes_until_close > window_minutes
+    ):
+        return full_margin_cents
+    if minutes_until_close <= critical_minutes:
+        return 0.0
+    span = window_minutes - critical_minutes
+    if span <= 0:
+        return 0.0
+    progress = (window_minutes - minutes_until_close) / span
+    return full_margin_cents * (1.0 - progress)
+
+
+def _apply_take_profit(
+    yes_price: int,
+    no_price: int,
+    inventory: InventoryState,
+    margin_cents: float,
+) -> tuple[int, int]:
+    """
+    Caps the EXIT side only (NO if long yes, YES if short yes) so it's
+    never rested more aggressively than the price implying at least
+    margin_cents of profit vs. avg_entry_price. No-ops on a flat
+    position (nothing to take profit on) or on the entry side (the
+    inventory skew above already handles making that side less
+    attractive; take-profit is strictly about the unwind side).
+    """
+    if inventory.net_yes_contracts > 0:
+        # Long yes -> exit side is NO. equiv_yes_sell_price = 100 - no_price
+        # must be >= avg_entry_price + margin, i.e. no_price <= that bound.
+        target_no_price = round(100 - (inventory.avg_entry_price + margin_cents))
+        no_price = min(no_price, target_no_price)
+    elif inventory.net_yes_contracts < 0:
+        # Short yes -> exit side is YES. yes_price must be
+        # <= avg_entry_price - margin.
+        target_yes_price = round(inventory.avg_entry_price - margin_cents)
+        yes_price = min(yes_price, target_yes_price)
+    return yes_price, no_price
+
+
+def classify_fill_exit_reason(
+    prior_net_yes_contracts: int,
+    prior_avg_entry_price: float,
+    fill_side: str,
+    fill_price: int,
+    margin_cents: float,
+) -> str | None:
+    """
+    Classifies a passive fill for logging: None if it was flat-to-start
+    or on the entry side (moves |net_yes_contracts| further from zero),
+    "take_profit_exit" if it reduces inventory at a price meeting the
+    full take-profit margin, or "exit" if it reduces inventory below
+    that margin (e.g. during the pre-resolution time-decay window, where
+    the margin requirement itself is being relaxed toward 0).
+    """
+    if prior_net_yes_contracts == 0:
+        return None
+
+    is_exit_side = (prior_net_yes_contracts > 0 and fill_side == "no") or (
+        prior_net_yes_contracts < 0 and fill_side == "yes"
+    )
+    if not is_exit_side:
+        return None
+
+    if prior_net_yes_contracts > 0:
+        profit_per_contract = (100 - fill_price) - prior_avg_entry_price
+    else:
+        profit_per_contract = prior_avg_entry_price - fill_price
+
+    return "take_profit_exit" if profit_per_contract >= margin_cents - 1e-9 else "exit"
+
+
 def compute_quote(
     book: MarketBook,
     risk_level: str,
@@ -30,6 +134,7 @@ def compute_quote(
     base_size: int,
     max_inventory: int,
     target_size: float,
+    minutes_until_close: float | None = None,
 ) -> HypotheticalQuote | None:
     """
     Base case (risk_level LOW, flat inventory): rest at the live Reference
@@ -66,6 +171,17 @@ def compute_quote(
       HIGH     -> quote pulled entirely (returns None). The caller is
                   responsible for separately invoking maybe_execute_stop_loss
                   to decide whether inventory should be actively flattened.
+
+    Take-profit (applied last, after skew/widen): if we hold inventory,
+    the exit side is additionally capped so it never rests more
+    aggressively than config.TAKE_PROFIT_MARGIN_CENTS of guaranteed
+    profit vs. avg_entry_price -- see _apply_take_profit. That margin
+    itself shrinks toward 0 as minutes_until_close (if provided --
+    see event_calendar.py) falls from config.EXIT_BEFORE_RESOLUTION_MINUTES
+    to config.CRITICAL_EXIT_MINUTES, so we stop holding out for a full
+    margin we're unlikely to get once resolution is imminent -- see
+    effective_take_profit_margin and, for what happens below the
+    critical threshold, maybe_execute_time_based_exit.
     """
     if risk_level == HIGH:
         return None
@@ -96,6 +212,14 @@ def compute_quote(
     if risk_level == ELEVATED:
         yes_price -= config.WIDEN_TICKS_ELEVATED
         no_price -= config.WIDEN_TICKS_ELEVATED
+
+    margin = effective_take_profit_margin(
+        minutes_until_close,
+        config.TAKE_PROFIT_MARGIN_CENTS,
+        config.EXIT_BEFORE_RESOLUTION_MINUTES,
+        config.CRITICAL_EXIT_MINUTES,
+    )
+    yes_price, no_price = _apply_take_profit(yes_price, no_price, inventory, margin)
 
     yes_price = _clamp_price(yes_price)
     no_price = _clamp_price(no_price)
@@ -172,10 +296,21 @@ def maybe_execute_stop_loss(
     risk_level: str,
     max_inventory: int,
     hard_stop_fraction: float,
+    order_size: int = 0,
+    min_buffer: int = 0,
 ) -> dict | None:
     """
     Thin gate in front of flatten_position: only flattens when risk_level
-    is HIGH and our inventory fraction is at/above hard_stop_fraction.
+    is HIGH and our inventory is at/above a contract threshold of
+    max(hard_stop_fraction * max_inventory, order_size + min_buffer).
+
+    The second term exists so a market with a small max_inventory
+    allocation doesn't hit "hard_stop_fraction of cap" after a single
+    ~order_size-contract fill -- e.g. a $150 cap against a 100-contract
+    quote size would otherwise trigger the hard stop at just 120
+    contracts (80%), before the position ever had a chance to work.
+    order_size/min_buffer both default to 0, which reduces exactly to
+    the original pure-fraction behavior.
     """
     if risk_level != HIGH:
         return None
@@ -185,7 +320,33 @@ def maybe_execute_stop_loss(
     net = inventory.net_yes_contracts
     if net == 0:
         return None
-    if abs(net) / max_inventory < hard_stop_fraction:
+    threshold = max(hard_stop_fraction * max_inventory, order_size + min_buffer)
+    if abs(net) < threshold:
         return None
 
     return flatten_position(book, inventory, max_inventory, reason="hard_stop_flatten")
+
+
+def maybe_execute_time_based_exit(
+    book: MarketBook,
+    inventory: InventoryState,
+    minutes_until_close: float | None,
+    max_inventory: int,
+    critical_minutes: float,
+) -> dict | None:
+    """
+    Forces an active flatten (crossing the spread, reusing
+    flatten_position) once minutes_until_close falls to/below
+    critical_minutes -- REGARDLESS of current risk_level, unlike
+    maybe_execute_stop_loss -- so we never carry inventory into a
+    market's binary resolution. No-ops if minutes_until_close is
+    unknown (event_calendar.py hasn't successfully fetched this
+    market's close_time yet), still above the threshold, or negative
+    (already past close -- settled/near-settled, not "critical").
+    """
+    if minutes_until_close is None:
+        return None
+    if minutes_until_close < 0 or minutes_until_close > critical_minutes:
+        return None
+
+    return flatten_position(book, inventory, max_inventory, reason="pre_resolution_flatten")

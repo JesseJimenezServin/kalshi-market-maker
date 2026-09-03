@@ -182,6 +182,39 @@ WIDEN_TICKS_ELEVATED = 2
 MAX_INVENTORY_SKEW_TICKS = 5
 
 # --------------------------------------------------------------------------
+# Proactive exit mechanics (take-profit, time-decay, refined hard-stop)
+# --------------------------------------------------------------------------
+# Once we hold inventory, the exit-side quote (NO if long yes, YES if
+# short yes) is never rested more aggressively than the price implying
+# at least this many cents of profit per contract vs. avg_entry_price.
+# Still a passive limit price (maker) -- this only constrains WHERE we
+# rest, never crosses the spread on its own. Previously the inventory
+# skew had no connection to actual entry price at all, so the "unwind"
+# side could rest at a price that would be a LOSS if filled.
+TAKE_PROFIT_MARGIN_CENTS = 4
+
+# Time-based pre-resolution exit (see event_calendar.py for close_time).
+# Starting this many minutes before a market's real close/resolution
+# time, TAKE_PROFIT_MARGIN_CENTS is gradually relaxed toward 0 as time
+# runs out (see quoting_policy.effective_take_profit_margin) -- we
+# stop holding out for a full profit margin we're unlikely to get once
+# resolution is imminent. Below CRITICAL_EXIT_MINUTES, any remaining
+# inventory is actively flattened (crossing the spread, same mechanics
+# as the HIGH-risk hard stop) REGARDLESS of current risk_level, so we
+# never carry a position into a market's binary resolution.
+EXIT_BEFORE_RESOLUTION_MINUTES = 60
+CRITICAL_EXIT_MINUTES = 15
+
+# Refined hard-stop threshold for small max_inventory allocations: the
+# HIGH-risk hard stop now fires at
+# max(HARD_STOP_INVENTORY_FRACTION * max_inventory, DEFAULT_SIMULATED_QUOTE_SIZE + this)
+# contracts, not a pure fraction of max_inventory -- otherwise a market
+# with a small allocation (e.g. a $150 cap against a 100-contract quote
+# size) hits "80% of cap" after a single fill, forcing an immediate,
+# unwanted stop-loss before the position ever had a chance to work.
+HARD_STOP_MIN_BUFFER_CONTRACTS = 50
+
+# --------------------------------------------------------------------------
 # News-awareness signal (zero-cost, purely advisory)
 # --------------------------------------------------------------------------
 # Google News' public RSS search (no key required) is polled for recent

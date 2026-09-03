@@ -39,8 +39,12 @@ sustained data-collection window.
   inventory fraction -> composite LOW/ELEVATED/HIGH risk level
 - quoting_policy.py -- active quoting policy: rests at the live Reference
   Price (not just the touch) before applying inventory skew, widen/pull
-  on risk escalation, simulated hard-stop flatten (crosses the spread via
-  adverse_selection_sim.InventoryState, still no real orders)
+  on risk escalation, a take-profit floor on the exit side (relaxed as
+  a market's resolution nears), and proactive exit triggers -- HIGH-risk
+  hard stop (refined threshold for small allocations) and a
+  time-based forced exit near resolution -- that actively flatten
+  (cross the spread via adverse_selection_sim.InventoryState, still no
+  real orders)
 - capital_allocator.py -- splits config.STARTING_CAPITAL_USD across the
   currently-watched markets, weighted by profit/risk (reusing
   incentive_screener's adjusted_score), bounded to [MIN_ALLOCATION_FRACTION,
@@ -85,7 +89,7 @@ sustained data-collection window.
   main.py or server.py can ever run at once (see Decisions log 2026-09-01)
 - manage.sh -- start/stop/restart/status for main.py + server.py via
   PID files -- use this instead of hand-typed nohup/pkill commands
-- test_logic.py -- offline unit tests, no network required, 44/44 passing
+- test_logic.py -- offline unit tests, no network required, 50/50 passing
 
 ## Completed milestones
 - 2026-08-31: Initial Phase 0 build: all modules above, 7 unit tests passing
@@ -618,6 +622,66 @@ shows exactly 3 tickers summing to exactly $1000, and reward_score/
 pnl_dollars/balance_dollars all report identically 170 points with
 matching end timestamps (~0.001s apart). Re-verified via grep that no
 order-placing code exists anywhere.
+
+## 2026-09-02 (completed): Proactive exit mechanics
+Per explicit request: previously, once a passive fill built inventory,
+the only exit mechanism was the HIGH-risk hard stop at 80% of
+max_inventory -- a position could otherwise sit and drift indefinitely,
+including into a market's own resolution. Three additions, all in
+quoting_policy.py, wired into main.py's scoring_loop/make_trade_handler:
+
+- **Take-profit floor**: once we hold inventory, compute_quote caps the
+  EXIT side only (NO if long yes, YES if short yes) so it's never rested
+  more aggressively than the price implying config.TAKE_PROFIT_MARGIN_CENTS
+  (4c) of real profit vs. avg_entry_price -- still a passive limit price
+  (maker), never crosses the spread on its own. This also fixes a real
+  gap: the existing inventory skew had zero connection to actual entry
+  price, so the unwind side could rest at a price that would be a LOSS
+  if filled.
+- **Time-based pre-resolution exit**: event_calendar.event_refresh_loop
+  now also caches each market's real close_time on MarketRuntimeState
+  (not just the boolean event_signal), so scoring_loop computes
+  minutes_until_close fresh every ~1s tick with no extra API call
+  (close_time is static). Starting config.EXIT_BEFORE_RESOLUTION_MINUTES
+  (60) before close, the take-profit margin above is linearly relaxed
+  toward 0 (quoting_policy.effective_take_profit_margin) -- we stop
+  holding out for a profit margin we're unlikely to get once resolution
+  is imminent. Below config.CRITICAL_EXIT_MINUTES (15),
+  maybe_execute_time_based_exit force-flattens any remaining inventory
+  (reusing flatten_position) REGARDLESS of risk_level, unlike the
+  existing hard stop.
+- **Refined hard-stop threshold**: maybe_execute_stop_loss now fires at
+  max(HARD_STOP_INVENTORY_FRACTION * max_inventory,
+  DEFAULT_SIMULATED_QUOTE_SIZE + config.HARD_STOP_MIN_BUFFER_CONTRACTS)
+  contracts, not a pure fraction -- otherwise a market with a small
+  allocation (e.g. the real $150 cap seen live this session) hits "80%
+  of cap" after a single ~100-contract fill, forcing an immediate,
+  unwanted stop-loss before the position ever had a chance to work.
+  Large allocations are unaffected (the fraction term still dominates).
+
+Each fill is now also classified for logging
+(quoting_policy.classify_fill_exit_reason, called from
+make_trade_handler with the pre-fill net/avg_entry captured before
+mutation): None (entry/accumulating), "take_profit_exit" (reduced
+inventory at a price meeting the full margin), or "exit" (reduced
+inventory below the full margin, e.g. during the time-decay window).
+New nullable simulated_fills.exit_reason column (in-place migration).
+The new forced flatten reuses the existing simulated_stop_losses table
+with reason="pre_resolution_flatten" -- no new table needed. Both new
+active-flatten paths (hard stop, pre-resolution) now also log a
+logger.warning() line, not just a DB row, matching the visibility
+other significant events (market switches) already get.
+
+6 new tests (take-profit floor actually constraining vs. not, the
+margin's time-decay curve including the zero-at-critical boundary, the
+forced time-based exit firing/not-firing, the refined hard-stop
+threshold protecting a small allocation while leaving large ones
+unaffected, and the fill classifier's take_profit_exit/exit/None
+cases); 50/50 passing. Re-verified via grep that no order-placing code
+exists anywhere. Restarted live and confirmed no errors, with all three
+watched markets' quotes unaffected while flat (net_yes_contracts=0),
+correctly exercising the "no take-profit floor on flat inventory"
+no-op path in production.
 
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks

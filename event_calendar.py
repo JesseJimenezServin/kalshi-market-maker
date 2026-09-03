@@ -77,10 +77,15 @@ async def event_refresh_loop(
     """
     Periodically fetches each watched ticker's real close_time and feeds
     hours_until_close into that ticker's RiskEngine
-    (states[ticker].risk_engine) as a proximity flag. No-ops entirely if
-    config.EVENT_CALENDAR_ENABLED is False. Polls far less often than the
-    ~1s scoring cadence -- close_time essentially never changes once a
-    market is listed.
+    (states[ticker].risk_engine) as a proximity flag. Also caches the
+    raw close_time on the MarketRuntimeState itself
+    (states[ticker].close_time) so main.py's scoring_loop can compute
+    minutes_until_close fresh on every ~1s tick (for the take-profit
+    time-decay and pre-resolution forced exit -- see quoting_policy.py)
+    without needing its own network call, since close_time is static.
+    No-ops entirely if config.EVENT_CALENDAR_ENABLED is False. Polls far
+    less often than the ~1s scoring cadence -- close_time essentially
+    never changes once a market is listed.
     """
     if not config.EVENT_CALENDAR_ENABLED:
         logger.info("Event calendar disabled (config.EVENT_CALENDAR_ENABLED = False) -- event_refresh_loop is a no-op.")
@@ -90,6 +95,7 @@ async def event_refresh_loop(
         for ticker, state in states.items():
             try:
                 close_time = await asyncio.to_thread(get_market_close_time, rest_client, ticker)
+                state.close_time = close_time
                 hours = hours_until_close(close_time) if close_time is not None else None
                 state.risk_engine.set_event_proximity(hours)
                 sim_logger.log_event_calendar_snapshot(
