@@ -683,6 +683,40 @@ watched markets' quotes unaffected while flat (net_yes_contracts=0),
 correctly exercising the "no take-profit floor on flat inventory"
 no-op path in production.
 
+## 2026-09-02 INCIDENT: main.py crashed outright on a transient network error
+main.py went down (found via ./manage.sh status while investigating an
+unrelated background-task notification) with an unhandled
+requests.exceptions.ConnectionError ("Connection reset by peer") raised
+inside market_switch_loop's find_replacement -> screen_incentive_programs
+-> get_all_incentive_programs REST call. asyncio.gather cancels every
+other task the moment ONE of them raises, so a single transient network
+blip during a switch-search took down the entire process -- server.py
+(a separate process) kept running throughout, so this wasn't caught by
+casual observation of the dashboard.
+
+Root cause: market_switch_loop's per-ticker body had NO try/except
+anywhere, unlike every other loop in main.py (incentive_refresh_loop,
+news_refresh_loop, event_refresh_loop), which all already guard their
+bodies with try/except Exception + logger.exception(...). Auditing the
+rest of main.py for the same gap found TWO more: scoring_loop (the most
+critical loop -- ~1s cadence, all scoring/quoting/inventory logic) had
+zero exception protection either, and make_trade_handler's on_trade
+(invoked directly from ws_client's message loop) wasn't guarded, so an
+error there would be caught by ws_client.run_forever's outer try/except
+but force a full WebSocket reconnect + resync of every watched book
+over a single bad trade message, rather than just skipping it.
+
+Fixed all three: market_switch_loop and scoring_loop each wrap their
+per-ticker body in try/except Exception, logging and continuing to the
+next ticker (or next interval) instead of taking down the process;
+on_trade wraps its body the same way, logging and returning instead of
+forcing a reconnect. No behavior change on the success path -- purely
+defensive. Restarted main.py (server.py was unaffected and stayed up
+throughout); confirmed stable afterward. This is a reliability gap that
+matters a lot for an unattended multi-day/multi-week run -- a single
+transient REST hiccup should never be able to take the whole pipeline
+down, and now it can't.
+
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks
    its own watch list at startup and can switch away mid-run on its own
