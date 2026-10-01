@@ -717,6 +717,38 @@ matters a lot for an unattended multi-day/multi-week run -- a single
 transient REST hiccup should never be able to take the whole pipeline
 down, and now it can't.
 
+## 2026-10-01 06:33:29 UTC -- OFFICIAL START of the 1-2 week unattended run
+Deployed to a DigitalOcean Droplet (<droplet-ip>, ubuntu-s-1vcpu-1gb-nyc1)
+as a systemd service (kalshi-lab.service, Restart=on-failure, enabled at
+boot), with a second localhost-only dashboard service
+(kalshi-dashboard.service, view via SSH tunnel), a 5-minute healthcheck
+cron alerting to a private ntfy.sh topic on failure, and a two-layer
+daily backup (on-box via sqlite3's online .backup() API, plus an
+opportunistic off-box pull to the local machine via a dedicated,
+command-restricted SSH key with no shell access).
+
+Restarted one final time at this timestamp specifically to mark a clean
+start -- everything before this point on the Droplet was deployment
+testing (including the news-relevance flood and the 24.5-hour
+continuous-re-optimizer incident, both found and fixed the same day).
+Watch list is 100% algorithm-selected (config.AUTO_SELECT_WATCHLIST=True,
+no manual override) and the market switcher is armed
+(MARKET_SWITCHER_ENABLED=True, using the relative-improvement fix).
+Starting watch list at this restart: KXNFLLADDERREC-26OCT01PITCLE-CLEQJUDKINS10
+($359), KXNFLLADDERREC-26OCT01PITCLE-CLEHFANNIN44 ($334),
+KXNFLLADDERRSHYDS-26OCT01PITCLE-PITJWARREN30 ($307) -- expected to
+change on its own via the switcher over the run; this is just the day-0
+snapshot. Confirmed clean startup, zero errors.
+
+When analyzing results after the run: data/paper_trading.sqlite (and
+its backups) contains BOTH this official window AND all of today's
+pre-start testing -- filter on ts >= 1790836411 (CONFIRMED against the
+live DB, not computed by hand: the first real inventory_marks row
+logged by this restart's process) to exclude the testing noise, most
+visibly the ~10,778-row pre-fix news_events flood and the 50 pre-fix
+market_switches from the continuous-re-optimizer incident, neither of
+which reflects real running conditions going forward.
+
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks
    its own watch list at startup and can switch away mid-run on its own
