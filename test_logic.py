@@ -1002,7 +1002,8 @@ def test_is_relevant_requires_distinctive_keyword_not_just_ratio():
     # Same real keyword list (mamdani first after the fix above).
     keywords = ["mamdani", "executive", "orders", "sign"]
 
-    true_positive = {"headline": "Mamdani imposes one-year ban on AI for most NYC students", "theme_tags": []}
+    # Corroborated by a second keyword ("sign") -> relevant.
+    true_positive = {"headline": "Mamdani to sign executive order on AI in schools", "theme_tags": []}
     assert is_relevant(keywords, true_positive, threshold=0.2) is True
 
     # Regression coverage for the live flood (2026-09-02): these each
@@ -1014,8 +1015,41 @@ def test_is_relevant_requires_distinctive_keyword_not_just_ratio():
     assert is_relevant(keywords, false_positive_1, threshold=0.2) is False
     assert is_relevant(keywords, false_positive_2, threshold=0.2) is False
 
+    # Mentions the distinctive keyword ALONE, no corroborating keyword --
+    # deliberately rejected now too (see is_relevant's docstring, part
+    # (b)/tradeoff note: a second live incident, 2026-09-29, needed a
+    # second corroborating keyword requirement, not just the distinctive
+    # one, which costs exactly this kind of borderline true positive).
+    uncorroborated = {"headline": "Mamdani imposes one-year ban on AI for most NYC students", "theme_tags": []}
+    assert is_relevant(keywords, uncorroborated, threshold=0.2) is False
+
     assert is_relevant([], true_positive, threshold=0.2) is False
     print("test_is_relevant_requires_distinctive_keyword_not_just_ratio: PASS")
+
+
+def test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term():
+    # Real incident, 2026-09-29: KXTRUMPAPPROVE-* markets all derived
+    # keywords=['trump', 'approval', 'average', 'exactly'] -- "trump" is
+    # the sole capitalized word, but as a sitting president's name it
+    # matches roughly 100% of current political news regardless of
+    # topic, flooding news_events within the first 90s of a live
+    # deployment. Requiring a SECOND keyword fixes this generically
+    # (no hardcoded per-entity stoplist).
+    keywords = ["trump", "approval", "average", "exactly"]
+
+    # "trump" alone, totally unrelated to his approval rating -> rejected.
+    unrelated = {"headline": "Trump, AI CEOs sign voluntary safety pact, back data center expansion", "theme_tags": []}
+    assert is_relevant(keywords, unrelated, threshold=0.2) is False
+
+    # "trump" + "approval" -> genuinely on-topic, still accepted.
+    on_topic = {"headline": "Trump's approval rating drops to new low in latest poll", "theme_tags": []}
+    assert is_relevant(keywords, on_topic, threshold=0.2) is True
+
+    # A market that derives only ONE keyword (nothing to corroborate
+    # with) must NOT be penalized -- falls back to the single-keyword
+    # bar, same as before this fix.
+    assert is_relevant(["mamdani"], {"headline": "Mamdani speaks at rally", "theme_tags": []}, threshold=0.2) is True
+    print("test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term: PASS")
 
 
 def test_build_news_query_ors_keywords():
@@ -1136,6 +1170,7 @@ if __name__ == "__main__":
     test_parse_articles_handles_malformed_xml_gracefully()
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
+    test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()
     test_is_recent_uses_cutoff()

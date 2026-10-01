@@ -198,24 +198,58 @@ def score_relevance(keywords: list[str], article: dict) -> float:
 
 def is_relevant(keywords: list[str], article: dict, threshold: float) -> bool:
     """
-    The actual "flag this article" decision -- requires BOTH the overlap
-    ratio (score_relevance) to clear `threshold` AND the single most
-    distinctive keyword (keywords[0] -- derive_keywords now ranks
-    proper nouns first) to be present.
+    The actual "flag this article" decision -- requires ALL of:
+      1. The overlap ratio (score_relevance) clears `threshold`.
+      2. The single most distinctive keyword (keywords[0] --
+         derive_keywords ranks proper nouns/acronyms first) is present.
+      3. If a SECOND keyword was derived at all, at least one of THOSE
+         (keywords[1:]) is also present -- not just keywords[0] alone.
+         Markets that derived only one keyword (nothing to corroborate
+         with) keep the single-keyword bar from #2.
 
-    CONFIRMED NECESSARY live 2026-09-02: using score_relevance's ratio
-    alone flooded news_events almost every poll -- with only 4 derived
-    keywords for a short title, a SINGLE generic-word hit ("sign" in
-    "Patriots Sign TE...", "orders" in "Justice department orders...")
-    already cleared threshold=0.2 (1/4=0.25) on totally unrelated
-    articles. Gating on the most distinctive keyword specifically kept
-    genuine matches (articles actually containing "mamdani") while
-    rejecting matches on filler words alone.
+    CONFIRMED NECESSARY live 2026-09-02 (two separate incidents, same
+    root cause -- a single keyword carrying the whole relevance
+    decision is too weak a signal on its own):
+
+    a) Using score_relevance's ratio alone flooded news_events almost
+       every poll -- with only 4 derived keywords for a short title, a
+       SINGLE generic-word hit ("sign" in "Patriots Sign TE...",
+       "orders" in "Justice department orders...") already cleared
+       threshold=0.2 (1/4=0.25) on totally unrelated articles. Adding
+       requirement #2 (keywords[0] specifically) fixed this.
+
+    b) Deployed to a fresh host 2026-09-29 and immediately flooded AGAIN
+       on a watchlist requirement #2 alone couldn't catch: three
+       "Will Trump's RCP approval average be exactly N on Sep 30,
+       2026?" markets all derived keywords=['trump','approval',
+       'average','exactly'] -- "trump" is keywords[0] (the only
+       capitalized word in the title) and matched roughly 100% of ALL
+       current political news regardless of topic, since it's a
+       sitting president's name, not a genuinely rare/distinctive term
+       the way "mamdani" was. Requirement #3 (also needs "approval",
+       "average", or "exactly") fixes this generically -- no
+       per-name/per-entity stoplist needed, and it degrades gracefully:
+       markets with a genuinely rare single distinctive keyword and
+       nothing else to derive still work off that keyword alone.
+
+    Known, accepted precision/recall tradeoff from (b): a headline that
+    mentions the distinctive keyword but genuinely none of the
+    supporting keywords (e.g. "Mamdani imposes AI ban in NYC schools"
+    for a market about him signing executive orders -- no "executive"/
+    "orders"/"sign" in that headline) now also gets rejected, even
+    though it's arguably still "something is happening with this
+    entity." Accepted deliberately: this signal is advisory-only (see
+    module docstring), and false positives from (b) were actively
+    harmful (near-continuous ELEVATED risk on good-faith noise), while
+    this specific kind of false negative just means the signal
+    occasionally stays quiet on a borderline-relevant article.
     """
     if not keywords:
         return False
     haystack = " ".join([article.get("headline", "")] + list(article.get("theme_tags", []))).lower()
     if keywords[0] not in haystack:
+        return False
+    if len(keywords) >= 2 and not any(kw in haystack for kw in keywords[1:]):
         return False
     return score_relevance(keywords, article) >= threshold
 
