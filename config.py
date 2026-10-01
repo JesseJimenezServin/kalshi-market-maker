@@ -264,10 +264,35 @@ NEWS_SIGNAL_DECAY_MINUTES = 45
 MARKET_SWITCHER_ENABLED = True
 
 # Real resting depth (both sides, real book only) relative to
-# target_size, above which a CURRENTLY watched market is considered
-# "crowded" -- diminishing marginal share for a new entrant. 1.0 means
-# real depth alone already equals the qualification threshold.
+# target_size, above which a CURRENTLY watched market is worth
+# SEARCHING for a replacement over -- 1.0 means real depth alone
+# already equals the qualification threshold. This is now only a loose
+# pre-filter (avoids spending REST calls searching when the current
+# market is obviously fine); it does NOT by itself decide whether a
+# switch actually happens -- see CROWDING_RELATIVE_IMPROVEMENT_FACTOR
+# below and market_switcher.is_worthwhile_crowding_switch.
+#
+# NOTE (2026-09-30): previously this constant ALONE decided whether a
+# switch happened. CONFIRMED live: once real market-wide crowding rose
+# well above 3.0 across EVERY currently active incentive program
+# (observed range ~5.6x-30x+, vs. ~8.9x least-crowded when 3.0 was
+# chosen on 2026-09-02), every watched ticker re-triggered "crowded"
+# the instant its cooldown cleared -- 50 switches in 24.5 hours,
+# averaging exactly MARKET_SWITCH_COOLDOWN_SEC apart. A fixed absolute
+# number goes stale as real conditions drift; the relative check below
+# doesn't.
 CROWDING_RATIO_THRESHOLD = 3.0
+
+# The ACTUAL deciding factor for a "crowded" trigger: the best
+# replacement market_switcher.find_replacement finds must have a real
+# crowding ratio at/below this fraction of the CURRENT market's
+# crowding ratio to be worth switching into -- e.g. 0.5 means the
+# replacement must be at least half as crowded. Self-adjusts to
+# whatever "normal" crowding looks like at any given time (rising or
+# falling), unlike a fixed absolute number. Not applied to a
+# "volatile" (HIGH risk) trigger -- that's about escaping OUR OWN risk
+# exposure, not chasing lower crowding.
+CROWDING_RELATIVE_IMPROVEMENT_FACTOR = 0.5
 
 # How long (seconds) a trigger condition (HIGH risk or crowded) must hold
 # CONTINUOUSLY before acting -- avoids switching on a single noisy tick.

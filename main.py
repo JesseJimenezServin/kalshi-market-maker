@@ -52,7 +52,7 @@ from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
 from event_calendar import event_refresh_loop, hours_until_close
 from singleton_lock import acquire_singleton_lock
-from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement
+from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement, is_worthwhile_crowding_switch
 
 logger = logging.getLogger("main")
 
@@ -414,6 +414,31 @@ async def market_switch_loop(
                     # the live incident this fixes.
                     switcher.record_search_attempt()
                     logger.info("%s: no replacement found -- backing off for the switch cooldown before retrying", ticker)
+                    continue
+
+                # A "crowded" trigger only means "worth searching" --
+                # still requires the best candidate found to be a
+                # MEANINGFUL relative improvement, not just technically
+                # ranked best among whatever's available. See
+                # is_worthwhile_crowding_switch's docstring for the live
+                # incident (2026-09-30) this fixes: without this check,
+                # an absolute crowding threshold alone kept re-triggering
+                # a search every cooldown period once EVERY active
+                # program exceeded it, with no market ever actually
+                # qualifying as "better enough" to stop the cycle.
+                # "volatile" (HIGH risk) triggers skip this gate --
+                # escaping our own risk exposure doesn't require the
+                # replacement to specifically be less crowded.
+                if trigger == "crowded" and not is_worthwhile_crowding_switch(
+                    crowding, replacement.crowding_ratio, config.CROWDING_RELATIVE_IMPROVEMENT_FACTOR
+                ):
+                    switcher.record_search_attempt()
+                    logger.info(
+                        "%s: best replacement %s (crowding=%s) isn't meaningfully less crowded than staying "
+                        "put (crowding=%s, need <= %.0f%% of that) -- not switching",
+                        ticker, replacement.market_ticker, replacement.crowding_ratio, crowding,
+                        config.CROWDING_RELATIVE_IMPROVEMENT_FACTOR * 100,
+                    )
                     continue
 
                 fill = quoting_policy.flatten_position(

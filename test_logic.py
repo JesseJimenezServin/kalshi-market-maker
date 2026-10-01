@@ -23,7 +23,7 @@ from quoting_policy import (
     classify_fill_exit_reason,
 )
 from news_feed import score_relevance, is_relevant, derive_keywords, _parse_articles, _build_news_query
-from market_switcher import MarketSwitcher, compute_crowding_ratio
+from market_switcher import MarketSwitcher, compute_crowding_ratio, is_worthwhile_crowding_switch
 from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
 from main import _select_initial_watchlist, MarketRuntimeState
@@ -706,6 +706,34 @@ def test_market_switcher_trigger_requires_sustain_and_cooldown():
     print("test_market_switcher_trigger_requires_sustain_and_cooldown: PASS")
 
 
+def test_is_worthwhile_crowding_switch_requires_meaningful_improvement():
+    # Real incident, 2026-09-30: an absolute crowding threshold alone
+    # kept re-triggering a search every cooldown period once EVERY
+    # active program exceeded it (observed range ~5.6x-30x+), with no
+    # candidate ever being "uncrowded enough" in absolute terms to stop
+    # the cycle. The relative comparison must still correctly decline a
+    # switch when the "best available" candidate isn't meaningfully
+    # better than staying put.
+    factor = 0.5  # replacement must be <= 50% as crowded
+
+    # Replacement barely better (8.0 vs 8.5, ratio ~0.94) -- not a
+    # meaningful improvement, must decline.
+    assert is_worthwhile_crowding_switch(8.5, 8.0, factor) is False
+
+    # Replacement dramatically better (30.0 -> 6.0, ratio 0.2) -- a real
+    # improvement, must accept.
+    assert is_worthwhile_crowding_switch(30.0, 6.0, factor) is True
+
+    # Exactly at the boundary (replacement == current * factor) -> accept.
+    assert is_worthwhile_crowding_switch(10.0, 5.0, factor) is True
+
+    # Unknown crowding on either side -> can't measure an improvement,
+    # must decline rather than switch blind.
+    assert is_worthwhile_crowding_switch(None, 5.0, factor) is False
+    assert is_worthwhile_crowding_switch(10.0, None, factor) is False
+    print("test_is_worthwhile_crowding_switch_requires_meaningful_improvement: PASS")
+
+
 class _FakeScreeningClient:
     """Fake REST client for testing select_watchlist/screen_incentive_programs
     end-to-end (get_all_incentive_programs + per-ticker get_orderbook/
@@ -1150,6 +1178,7 @@ if __name__ == "__main__":
     test_risk_engine_news_signal_escalates_then_decays()
     test_compute_crowding_ratio()
     test_market_switcher_trigger_requires_sustain_and_cooldown()
+    test_is_worthwhile_crowding_switch_requires_meaningful_improvement()
     test_hours_until_close()
     test_risk_engine_event_proximity_escalates_within_window()
     test_estimate_crowding_and_volatility_from_fake_client()

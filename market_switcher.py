@@ -10,6 +10,17 @@ global config.MARKET_SWITCH_COOLDOWN_SEC between switches, per the
 explicit design brief -- "does not need to be switching rapidly, only
 when needed."
 
+Crowding-triggered switches ALSO require the actual best replacement
+found to be a RELATIVE improvement over the current market (see
+is_worthwhile_crowding_switch), not just "current market exceeds a
+fixed crowding number" -- CROWDING_RATIO_THRESHOLD below is now only a
+loose pre-filter (is it even worth spending the REST calls to search?),
+not the deciding factor. CONFIRMED NECESSARY live 2026-09-30: the
+absolute threshold alone, once real market-wide crowding rose well
+above it across EVERY active program, turned this into a de facto
+continuous re-optimizer (50 switches in 24.5 hours, averaging exactly
+the cooldown period apart) despite the explicit design above.
+
 Runtime-only: does NOT rewrite config.WATCHED_MARKET_TICKERS. If main.py
 restarts, the watch list reverts to whatever's configured there. A switch
 away from a market simulates flattening any open hypothetical position
@@ -65,6 +76,41 @@ def _crowding_ratio_from_raw_orderbook(raw: dict, target_size: float) -> float |
     return (yes_total + no_total) / (2.0 * target_size)
 
 
+def is_worthwhile_crowding_switch(
+    current_crowding: float | None,
+    replacement_crowding: float | None,
+    relative_improvement_factor: float,
+) -> bool:
+    """
+    True only if `replacement_crowding` is a MEANINGFUL improvement over
+    `current_crowding` -- at most `relative_improvement_factor` times as
+    crowded (e.g. 0.5 means the replacement must be at least half as
+    crowded as staying put). False if either crowding value is unknown
+    (can't measure an improvement we can't observe).
+
+    Replaces an earlier design where check_trigger's absolute
+    CROWDING_RATIO_THRESHOLD alone decided whether a "crowded" trigger
+    fired at all. CONFIRMED live 2026-09-30: that threshold (3.0,
+    calibrated 2026-09-02 against a least-crowded-observed of ~8.9x) was
+    far below what EVERY currently active program measured weeks later
+    (~5.6x-30x+), so every single watched ticker re-triggered "crowded"
+    the instant its cooldown cleared -- 50 switches in 24.5 hours,
+    averaging exactly config.MARKET_SWITCH_COOLDOWN_SEC apart, a
+    continuous re-optimizer in practice despite the explicit "only
+    switch when needed" design. A RELATIVE comparison between the
+    current ticker and the actual best replacement found self-adjusts
+    to whatever "normal" crowding looks like at any given time -- no
+    number to recalibrate as real market-wide crowding rises or falls.
+    Only applied to the "crowded" trigger reason (see
+    main.py's market_switch_loop) -- a "volatile" (HIGH risk) trigger is
+    about escaping OUR OWN risk exposure in the current market, not
+    chasing lower crowding, so it isn't gated by this check.
+    """
+    if current_crowding is None or replacement_crowding is None:
+        return False
+    return replacement_crowding <= current_crowding * relative_improvement_factor
+
+
 class MarketSwitcher:
     """
     Tracks how long each currently-watched ticker has continuously held
@@ -88,6 +134,14 @@ class MarketSwitcher:
         check interval. Only returns non-None once the condition has held
         continuously for config.SWITCH_TRIGGER_SUSTAIN_SEC AND the global
         cooldown since the last switch has elapsed.
+
+        A "crowded" return here only means "worth SEARCHING for a
+        replacement" (crowding_ratio clears the loose
+        config.CROWDING_RATIO_THRESHOLD pre-filter) -- the caller
+        (main.py's market_switch_loop) must separately confirm the best
+        replacement actually found is a meaningful relative improvement
+        (see is_worthwhile_crowding_switch) before committing to a
+        switch. "volatile" carries no such extra gate.
         """
         now = now if now is not None else time.time()
 
