@@ -3,6 +3,7 @@
 *.key
 venv/
 data/*.sqlite
+droplet_backups/
 logs/
 __pycache__/
 *.pid
