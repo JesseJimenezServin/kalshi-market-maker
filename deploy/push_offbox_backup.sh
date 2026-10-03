@@ -17,8 +17,25 @@
 set -uo pipefail
 
 CONFIG_FILE="${KALSHI_OFFBOX_CONFIG:-/etc/kalshi-offbox.env}"
-# shellcheck source=/dev/null
-[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+# Read the config WITHOUT clobbering anything already in the environment, so
+# a one-off `DB_PATH=/nonexistent ./push_offbox_backup.sh` can override a
+# single setting for testing. Plain `. "$CONFIG_FILE"` assigns
+# unconditionally and silently wins over the caller -- which made the
+# forced-failure check in deploy/README.md a no-op: it ran a NORMAL backup
+# and exited 0 while appearing to prove the alert path (CONFIRMED 2026-10-03,
+# twice, before this was fixed). A verification step that cannot fail is
+# worse than none.
+if [ -r "$CONFIG_FILE" ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in ''|'#'*) continue ;; esac
+        _key=${_line%%=*}
+        _val=${_line#*=}
+        case "$_key" in [A-Za-z_][A-Za-z0-9_]*) ;; *) continue ;; esac
+        eval ": \"\${$_key:=\$_val}\"" || true
+        eval "export $_key"
+    done < "$CONFIG_FILE"
+    unset _line _key _val
+fi
 # NTFY_TOPIC is shared with healthcheck.sh so there is one place to watch
 # and one secret to rotate.
 ALERTS_ENV="${KALSHI_ALERTS_ENV:-/etc/kalshi-alerts.env}"
@@ -105,8 +122,15 @@ gzip -6 "$STAGING_DB" || fail "gzip failed"
 GZ_BYTES=$(stat -c %s "$STAGING_GZ")
 
 log "uploading ${GZ_BYTES} bytes to ${RCLONE_REMOTE}"
+# Native b2 backend, NOT the S3-compatible endpoint. Backblaze's S3 layer
+# returns 403 Forbidden on PUT for an application key that is restricted to
+# a single bucket (CONFIRMED 2026-10-03: the same key authorizes fine via
+# b2_authorize_account with writeFiles and uploads fine through the b2
+# backend, and removing the ACL header made no difference). Since scoping
+# the key to one bucket with no delete rights is the whole point, the b2
+# backend is the right side of that trade.
 rclone copyto "$STAGING_GZ" "${RCLONE_REMOTE}/paper_trading_${TIMESTAMP}.sqlite.gz" \
-    --s3-no-check-bucket --retries 3 --low-level-retries 10 --stats-one-line \
+    --retries 3 --low-level-retries 10 --stats-one-line \
     || fail "rclone upload failed (credentials, network, or bucket policy)"
 
 # Verify by reading the object back, not by trusting the exit code.

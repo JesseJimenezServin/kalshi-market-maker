@@ -896,6 +896,68 @@ Consider rotating the topic anyway: it sat in a file on two machines
 and in this session's logs. Changing it is a one-line edit to
 /etc/kalshi-alerts.env plus re-subscribing in the ntfy app.
 
+## 2026-10-03: laptop removed from the system; off-box backup live
+
+GOAL MET. Nothing Kalshi-related runs on the laptop any more: no launchd
+job, no process, no cron, port 8000 free. The Droplet is the whole
+system and the laptop is a viewing terminal reached by SSH tunnel.
+
+Off-box backup is now a Droplet-side PUSH to Backblaze B2
+(kalshi-db-backups-prod), on kalshi-offbox-backup.timer daily at
+03:30 UTC with up to 600s jitter and Persistent=true so a missed run
+fires on next boot. Verified end to end, including via `systemctl start`
+rather than only from a shell: 975MB -> 72.7MB in ~1m40s, read-back size
+check, staging cleaned, and both forced-failure paths exiting 1 with an
+ntfy alert.
+
+MOST IMPORTANT VERIFICATION: the backup was actually RESTORED off-box --
+downloaded from B2 to the laptop with the restricted key, gunzipped to
+956022784 bytes, PRAGMA integrity_check ok, 726967 snapshot_scores rows.
+An unrestored backup is a hypothesis, not a backup.
+
+The laptop-era run (09-01..09-05, 153280 rows) existed nowhere else, so
+it was uploaded to B2 as
+laptop-era/paper_trading_laptop_20260901-20260905.sqlite.gz, SHA1
+confirmed matching. Local data/ and droplet_backups/ are now safe to
+delete; nothing unique remains on this machine.
+
+CREDENTIALS -- what was changed and why. The key supplied was a MASTER
+application key: scoped to all buckets, with deleteFiles, deleteBuckets,
+deleteKeys, writeKeys and bypassGovernance. Putting that on the Droplet
+would have defeated the entire point of the off-box copy, because
+anything that compromised or malfunctioned on the Droplet could then
+erase every backup in the account and bypass object-lock retention. A
+restricted key "kalshi-droplet-offbox-push" was minted instead --
+writeFiles, listFiles, readFiles, scoped to the single bucket, no delete
+-- and only that key is on the box. readFiles is included deliberately
+so a restore works with the same key. rclone confirms the scoping
+independently: pointing it at another bucket fails with "you must use
+bucket kalshi-db-backups-prod with this application key".
+The master key should be rotated: it was pasted into a chat transcript.
+Retention is NOT yet configured -- it belongs on the bucket as a
+lifecycle rule (provider-enforced, so it still works when this host is
+gone) and was left for an explicit decision about the window rather
+than set unilaterally, since it deletes data on a schedule. Bucket
+currently holds 4 test-run backups (~290MB) plus the laptop-era archive.
+
+B2 GOTCHA worth remembering: B2's S3-compatible endpoint returns 403
+Forbidden on PUT for a bucket-restricted application key. The same key
+authorizes fine via b2_authorize_account with writeFiles, lists fine,
+and uploads fine through rclone's NATIVE b2 backend; removing the ACL
+header made no difference. Since bucket-scoping is the security property
+worth keeping, the native backend is the right side of that trade.
+
+BUG IN MY OWN SCRIPT, found by the forced-failure test not failing:
+push_offbox_backup.sh sourced /etc/kalshi-offbox.env with a plain `.`,
+which assigns unconditionally and so silently overrode any environment
+variable the caller passed. The documented verification step
+(`DB_PATH=/nonexistent ./push_offbox_backup.sh`) therefore ran a NORMAL
+backup and exited 0 while appearing to prove the alert path -- it did
+this twice before being noticed. The config reader now uses `${k:=v}` so
+the environment wins, verified both ways. A verification step that
+cannot fail is worse than no verification step, which is the same lesson
+as the 10-02 silent backup failure in a new costume.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
