@@ -1082,6 +1082,78 @@ Rollback copies on the Droplet: /root/server.py.orig-20261003 (before
 any of today's query work) and /root/server.py.prev-groupby (after the
 GROUP BY rewrite, before the orderbook scoping).
 
+## 2026-10-03: monitoring gaps closed before the unattended run
+
+The run was otherwise ready; what was missing was visibility into the
+things that protect the run. Closed two of three gaps here; the third was
+handled outside the repo.
+
+GAP 1 -- nothing reported the off-box backup silently ceasing. The push
+script alerts when it FAILS, but a dead timer, a masked unit or a
+removed cron produces no failure to alert on, so silence was being read
+as success. That is exactly the 10-02 incident one level up.
+FIX, two parts:
+  - push_offbox_backup.sh now writes /var/lib/kalshi-offbox/last-success
+    ONLY after the upload and read-back size check both pass, so the
+    file's mtime answers "when did a verified off-box copy last exist".
+  - healthcheck.sh alerts if that marker is missing, or older than 36h
+    (OFFBOX_STALE_SECONDS: a daily timer, so this tolerates one missed
+    run plus jitter). It also checks the timer unit is still armed, which
+    catches the failure earlier than the marker would.
+
+GAP 3 -- the healthcheck only watched kalshi-lab. It now also checks
+kalshi-dashboard (flagged non-critical in the alert text itself, since
+losing the dashboard costs no data) and kalshi-offbox-backup.timer.
+The script no longer exits at the first problem: it checks everything and
+reports each independently, so a down dashboard cannot mask a dead
+backup timer.
+
+GAP 2 -- "the whole Droplet is gone" cannot be detected by anything
+running on the Droplet. DigitalOcean CPU and memory alert policies were
+saved 2026-10-03, which covers it from outside.
+
+ALERT THROTTLING, added unprompted because it would otherwise have made
+the above counterproductive: a 5-minute cron turns one real problem into
+288 notifications a day for as long as it lasts, which trains you to
+ignore them. notify() is now keyed per issue and re-alerts at most
+hourly (NOTIFY_THROTTLE_SECONDS), with the FIRST alert still immediate,
+and state kept in /var/lib/kalshi-healthcheck. A key's state is cleared
+when its condition recovers, so a recurrence alerts immediately instead
+of being suppressed by a stale timestamp. The throttle stamp is written
+only when curl actually succeeds -- a failed POST must not count as
+"already alerted".
+
+Also fixed, same class of bug as the push script's: healthcheck.sh
+sourced /etc/kalshi-alerts.env with a plain `.`, which assigns
+unconditionally and so silently overrode any caller-supplied NTFY_TOPIC.
+Both scripts now let the environment win, and both are therefore
+testable without editing /etc.
+
+VERIFIED, nine cases, using a throwaway ntfy topic so the real one was
+not spammed:
+    1. all healthy                                exit 0, silent
+    2. marker missing                             exit 1, alert
+    3. marker 40h old (limit 36h)                 exit 1, alert
+    4. marker 30h old (inside window)             exit 0, silent
+    5. same issue twice                           first alerts, second suppressed
+    6. no NTFY_TOPIC anywhere                     exit 2, loud FATAL
+    7. kalshi-dashboard stopped                   exit 1, alert
+    8. kalshi-offbox-backup.timer stopped         exit 1, alert
+    9. healthy again after restoring both         exit 0, silent
+Plus one real alert delivered to the live topic through the script's own
+notify(), confirmed by the throttle stamp being written (it is only
+written when curl succeeds). Both services were restored and the timer
+re-armed; verified active afterwards.
+
+READINESS at the end of this: disk projected to peak at 12.65GB of ~20GB
+usable on the last day of the run, growth 394MB/day recent, both backup
+layers verified including an actual off-box restore, all three units
+`enabled` so they survive reboot, collector and backup failures now
+self-reporting, and box-level failure covered by DigitalOcean. Remaining
+non-blockers: the B2 lifecycle rule is still unset (bucket grows ~3.5GB
+over the run, pennies) and the B2 master key still wants rotating since
+it was pasted into a chat transcript.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

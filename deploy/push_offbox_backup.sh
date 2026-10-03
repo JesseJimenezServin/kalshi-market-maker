@@ -141,6 +141,20 @@ REMOTE_BYTES=$(rclone size "${RCLONE_REMOTE}/paper_trading_${TIMESTAMP}.sqlite.g
 
 trap - ERR
 cleanup
+
+# Success marker for healthcheck.sh. Written ONLY here, i.e. only after the
+# upload and the read-back size check both passed, so its mtime is "when a
+# verified off-box copy last existed". That is the one question a failure
+# alert cannot answer: if this script never runs -- dead timer, masked unit,
+# removed cron -- it emits no failure, and silence gets read as success.
+# That was the 2026-10-02 incident, and this marker is what makes the next
+# one detectable.
+: "${OFFBOX_MARKER:=/var/lib/kalshi-offbox/last-success}"
+mkdir -p "$(dirname "$OFFBOX_MARKER")" 2>/dev/null || true
+printf '%s paper_trading_%s.sqlite.gz %s bytes (raw %s)\n' \
+    "$(date -u +%FT%TZ)" "$TIMESTAMP" "$GZ_BYTES" "$DB_BYTES" > "$OFFBOX_MARKER" \
+    || log "WARNING: could not write success marker $OFFBOX_MARKER"
+
 log "OK: uploaded paper_trading_${TIMESTAMP}.sqlite.gz (${GZ_BYTES} bytes from ${DB_BYTES} bytes raw)"
 
 # NOTE: retention is deliberately NOT done here. Use a bucket lifecycle rule
