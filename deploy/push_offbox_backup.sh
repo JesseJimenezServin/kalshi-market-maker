@@ -19,8 +19,13 @@ set -uo pipefail
 CONFIG_FILE="${KALSHI_OFFBOX_CONFIG:-/etc/kalshi-offbox.env}"
 # shellcheck source=/dev/null
 [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+# NTFY_TOPIC is shared with healthcheck.sh so there is one place to watch
+# and one secret to rotate.
+ALERTS_ENV="${KALSHI_ALERTS_ENV:-/etc/kalshi-alerts.env}"
+# shellcheck source=/dev/null
+[ -z "${NTFY_TOPIC:-}" ] && [ -r "$ALERTS_ENV" ] && . "$ALERTS_ENV"
 
-: "${DB_PATH:=/opt/kalshi_liquidity_lab/data/paper_trading.sqlite}"
+: "${DB_PATH:=/root/kalshi_liquidity_lab/data/paper_trading.sqlite}"
 : "${RCLONE_REMOTE:?RCLONE_REMOTE not set (e.g. offbox:kalshi-lab-backups)}"
 : "${NTFY_TOPIC:?NTFY_TOPIC not set -- failure alerting is mandatory, see header}"
 : "${NTFY_URL:=https://ntfy.sh}"

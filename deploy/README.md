@@ -25,7 +25,7 @@ before trusting the timer.
 
 ```bash
 # 0. From the laptop, copy this directory up (needs the admin key added first)
-rsync -av --rsync-path="sudo rsync" deploy/ root@<droplet-ip>:/opt/kalshi_liquidity_lab/deploy/
+rsync -av --rsync-path="sudo rsync" deploy/ root@<droplet-ip>:/root/kalshi_liquidity_lab/deploy/
 
 # 1. Dependencies
 apt-get update && apt-get install -y rclone sqlite3
@@ -38,21 +38,21 @@ rclone config          # creates /root/.config/rclone/rclone.conf
 chmod 600 /root/.config/rclone/rclone.conf
 
 # 3. Config file
-cp /opt/kalshi_liquidity_lab/deploy/kalshi-offbox.env.example /etc/kalshi-offbox.env
+cp /root/kalshi_liquidity_lab/deploy/kalshi-offbox.env.example /etc/kalshi-offbox.env
 chmod 600 /etc/kalshi-offbox.env
 vi /etc/kalshi-offbox.env     # set RCLONE_REMOTE and NTFY_TOPIC at minimum
 
 # 4. FIRST RUN BY HAND -- do not skip. Confirms free space, snapshot
 #    integrity, upload, and the read-back size check all pass on real data.
-/opt/kalshi_liquidity_lab/deploy/push_offbox_backup.sh; echo "exit=$?"
+/root/kalshi_liquidity_lab/deploy/push_offbox_backup.sh; echo "exit=$?"
 
 # 5. Prove the alerting works before relying on it. A backup you cannot
 #    see fail is the bug this replaces.
 NTFY_TOPIC=<topic> DB_PATH=/nonexistent \
-  /opt/kalshi_liquidity_lab/deploy/push_offbox_backup.sh   # expect exit=1 + a push notification
+  /root/kalshi_liquidity_lab/deploy/push_offbox_backup.sh   # expect exit=1 + a push notification
 
 # 6. Arm the timer
-cp /opt/kalshi_liquidity_lab/deploy/kalshi-offbox-backup.{service,timer} /etc/systemd/system/
+cp /root/kalshi_liquidity_lab/deploy/kalshi-offbox-backup.{service,timer} /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now kalshi-offbox-backup.timer
 systemctl list-timers kalshi-offbox-backup.timer

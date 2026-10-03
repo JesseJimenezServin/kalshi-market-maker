@@ -823,6 +823,79 @@ backup SSH key on this laptop deliberately cannot do it (it is
 restricted to the Droplet's forced push_latest_backup.sh command, so no
 general-access credential is stored here).
 
+## 2026-10-03 INCIDENT (caught before it hit): Droplet disk would have filled mid-run
+
+Found by checking capacity after gaining admin access to the Droplet.
+Nothing had failed yet; this was ~9 days from failing.
+
+backup_db.py kept KEEP_LAST = 5 UNCOMPRESSED full snapshots of a
+database growing ~390MB/day. Measured from three consecutive on-box
+backups plus the live file: 269MB (10-01 09:00) -> 662MB (10-02 09:00)
+-> 939MB live (10-03 02:19), i.e. 393MB/day then 385MB/day, so flat
+rather than tapering. Five full copies of that grow faster than the
+database itself: projected 21.6GB of DB artifacts against ~20GB of
+usable disk (24GB total less ~2.8GB OS/venv and the ext4 reserve) at
+about day 10 -- roughly 10-12/10-13, i.e. BEFORE the 14-day run that
+started 10-01 would have finished.
+
+Consequence had it been missed: the disk fills, main.py's SQLite writes
+start failing mid-run, and the run ends ~4 days short with its final
+days of data lost. The 5-minute healthcheck would have caught the
+resulting stall, but only after the damage.
+
+FIX (applied 10-03, verified on the box):
+- backup_db.py now gzips each snapshot, and its retention sweep also
+  picks up legacy uncompressed files so the old ones rotate out
+  normally. Measured on the real 940MB database: 940032000 -> 71432530
+  bytes, a 92.4% reduction, in 16 seconds wall clock (nice -n 10, since
+  this shares one vCPU with main.py).
+- It also refuses to start unless ~1.3x the DB size is free, so the
+  backup can never itself be the process that fills the disk and takes
+  main.py's writes down.
+- The three existing uncompressed backups were compressed in place:
+  1.1GB -> 102MB, and disk use went 4.7GB -> 3.7GB.
+- push_latest_backup.sh (the restricted key's forced command) now zcats
+  .gz backups, so it still streams RAW sqlite bytes and any existing
+  puller keeps working unchanged. CONFIRMED: streamed 940032000 bytes
+  with a valid "SQLite format 3" header, and the forced-command binding
+  in authorized_keys is intact.
+- CONFIRMED end to end: the new gzipped backup decompresses to
+  940032000 bytes, PRAGMA integrity_check returns ok, snapshot_scores
+  has 716375 rows with max(ts) at the backup instant, simulated_fills
+  3205.
+Reprojected with compression: ~7.8GB total at day 14, leaving ~12.2GB
+headroom. The disk is no longer the binding constraint.
+
+Worth a separate decision later, not fixed here: ~390MB/day of SQLite
+for three watched markets is a lot, and it is dominated by
+orderbook_snapshots. Reducing that sampling rate would shrink
+everything downstream, but changing logging volume mid-run would make
+the run's data non-uniform, so it was deliberately left alone.
+
+## 2026-10-03 SECURITY: alert topic was about to be published
+
+While copying the Droplet's untracked infrastructure into deploy/ for
+the first time, healthcheck.sh was found to hardcode the private ntfy
+topic. Committing it as-is would have published the topic to GitHub,
+letting anyone read these alerts and post convincing forged ones --
+including a forged "all clear".
+
+FIX: the topic now lives in /etc/kalshi-alerts.env (chmod 600, not in
+git), sourced by both healthcheck.sh and the new
+deploy/push_offbox_backup.sh so there is one secret to rotate and one
+place to watch. The file was written on the Droplet from the value
+already there, so the secret was never retyped into anything tracked.
+healthcheck.sh now exits 2 with a loud FATAL if the topic is missing
+rather than POSTing to an empty URL -- a healthcheck that cannot alert
+but looks healthy is the exact 10-02 failure shape.
+CONFIRMED all three paths: normal run exits 0 silently; with the
+secrets file absent it exits 2 and logs FATAL; and a labelled test POST
+to the real topic returned HTTP 200.
+
+Consider rotating the topic anyway: it sat in a file on two machines
+and in this session's logs. Changing it is a one-line edit to
+/etc/kalshi-alerts.env plus re-subscribing in the ntfy app.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

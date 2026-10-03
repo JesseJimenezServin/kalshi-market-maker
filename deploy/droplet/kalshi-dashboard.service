@@ -1,0 +1,17 @@
+[Unit]
+Description=Kalshi Liquidity Lab - read-only dashboard (localhost only, access via SSH tunnel)
+After=network-online.target kalshi-lab.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/kalshi_liquidity_lab
+ExecStart=/root/kalshi_liquidity_lab/venv/bin/python3 /root/kalshi_liquidity_lab/server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

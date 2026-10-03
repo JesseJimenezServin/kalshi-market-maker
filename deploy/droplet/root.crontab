@@ -1,0 +1,2 @@
+*/5 * * * * /root/healthcheck.sh >> /root/healthcheck.log 2>&1
+0 9 * * * /root/kalshi_liquidity_lab/venv/bin/python3 /root/backup_db.py >> /root/backup_db.log 2>&1
