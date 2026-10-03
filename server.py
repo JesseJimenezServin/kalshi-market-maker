@@ -82,7 +82,12 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _latest_per_ticker(conn: sqlite3.Connection, table: str, columns: str) -> dict[str, sqlite3.Row]:
+def _latest_per_ticker(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: str,
+    tickers: list[str] | None = None,
+) -> dict[str, sqlite3.Row]:
     """
     Newest row per ticker.
 
@@ -113,13 +118,32 @@ def _latest_per_ticker(conn: sqlite3.Connection, table: str, columns: str) -> di
     select named columns, so it does not reach the JSON payload -- do not
     dict() these rows wholesale without dropping it.
     """
-    rows = conn.execute(
-        f"""
-        SELECT {columns}, max(ts) AS _max_ts
-        FROM {table}
-        GROUP BY ticker
-        """
-    ).fetchall()
+    if tickers is None:
+        rows = conn.execute(
+            f"""
+            SELECT {columns}, max(ts) AS _max_ts
+            FROM {table}
+            GROUP BY ticker
+            """
+        ).fetchall()
+    else:
+        # Restricting by ticker turns a walk of the whole (ticker, ts) index
+        # into one lookup per named ticker. Worth it where the caller already
+        # knows it will use only a few of them -- see the orderbook_snapshots
+        # call site, which needed 3 of 29.
+        wanted = list(tickers)
+        if not wanted:
+            return {}
+        placeholders = ",".join("?" * len(wanted))
+        rows = conn.execute(
+            f"""
+            SELECT {columns}, max(ts) AS _max_ts
+            FROM {table}
+            WHERE ticker IN ({placeholders})
+            GROUP BY ticker
+            """,
+            wanted,
+        ).fetchall()
     return {row["ticker"]: row for row in rows}
 
 
@@ -306,6 +330,15 @@ def _risk_reason(
 # duplicating the live ticker it had been switched away FROM.
 RECENCY_CUTOFF_SEC = 20.0
 
+# Seconds between dashboard payload builds. Was 1.0, which was aspirational
+# rather than real: a build cost ~25s on 2026-10-03, so an attached browser
+# kept the loop ~96% busy and starved main.py of the Droplet's single vCPU
+# while contributing nothing -- nobody saw a 1s refresh. Making the interval
+# explicit hands the core back between builds. Keep this comfortably above
+# the real build cost; if the build is ever optimised well below this,
+# lower it rather than leaving the dashboard needlessly stale.
+WS_TICK_SECONDS = 15.0
+
 
 def _is_recent(row: sqlite3.Row | None, now: float) -> bool:
     return row is not None and (now - row["ts"]) <= RECENCY_CUTOFF_SEC
@@ -359,7 +392,6 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
             "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining, "
             "start_date, end_date",
         )
-        books = _latest_per_ticker(conn, "orderbook_snapshots", "ticker, ts, yes_levels, no_levels")
         quotes = _latest_per_ticker(
             conn, "quote_snapshots",
             "ticker, ts, risk_level, quote_yes_price, quote_yes_size, quote_no_price, quote_no_size, "
@@ -381,6 +413,16 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         active_tickers = {t for t, r in inventory.items() if _is_recent(r, now)} | \
             {t for t, r in quotes.items() if _is_recent(r, now)}
         tickers = sorted(active_tickers) if active_tickers else sorted(set(config.WATCHED_MARKET_TICKERS))
+
+        # Deliberately queried AFTER `tickers` is known, and scoped to it.
+        # orderbook_snapshots carries the yes_levels/no_levels blobs, so it
+        # was the most expensive read in the tick (8.6s of ~25s on
+        # 2026-10-03) while returning 29 tickers for a table that renders 3.
+        # `book` is only ever read as books.get(ticker) inside the loop
+        # below, so narrowing this to `tickers` cannot change the payload.
+        books = _latest_per_ticker(
+            conn, "orderbook_snapshots", "ticker, ts, yes_levels, no_levels", tickers
+        )
 
         markets = []
         for ticker in tickers:
@@ -510,7 +552,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             payload = await asyncio.to_thread(build_dashboard_payload, since_ts)
             since_ts = next_since_ts
             await websocket.send_text(json.dumps(payload))
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(WS_TICK_SECONDS)
     except WebSocketDisconnect:
         logger.info("Dashboard WebSocket client disconnected")
 

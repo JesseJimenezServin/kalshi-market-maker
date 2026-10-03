@@ -1021,6 +1021,67 @@ came from the static benchmark. I should have said they were measured
 without a concurrent writer, because that turned out to be most of the
 difference.
 
+## 2026-10-03: dashboard CPU load fixed (scoped orderbook query + 15s tick)
+
+Applied the two remaining options. Together with the earlier
+max(ts)/GROUP BY rewrite this takes the tick from 41.2s to ~9.3s and the
+duty cycle from ~96% to ~38%, so the Droplet's single vCPU is no longer
+saturated whenever a browser is open.
+
+OPTION 3 -- scope the orderbook query. _latest_per_ticker now takes an
+optional ticker list, and the orderbook_snapshots call is MOVED to after
+`tickers` is computed so it can be restricted to exactly the markets
+being rendered. That table carries the yes_levels/no_levels blobs and
+was the single most expensive read in the tick while returning 29
+tickers for a table that renders 3. `book` is only ever read as
+books.get(ticker) inside the render loop, so narrowing it cannot change
+the payload.
+Measured on a static copy: 9.67s unscoped (29 tickers) -> 0.287s scoped
+(3 tickers), a 34x improvement, and EXPLAIN QUERY PLAN changes from a
+full index walk to `SEARCH orderbook_snapshots USING INDEX
+idx_orderbook_ticker_ts (ticker=?)`. Results verified identical for the
+scoped tickers, and the empty-list case returns {} rather than emitting
+invalid `IN ()` SQL.
+
+OPTION 1 -- WS_TICK_SECONDS = 15.0, replacing a hardcoded
+asyncio.sleep(1.0). The 1s target was aspirational rather than real: a
+build cost ~25s, so nobody ever saw a 1s refresh, and the loop simply
+ran flat out. Making the interval explicit hands the core back between
+builds.
+
+RESULT on the live box:
+    payload build, cold (just after restart)   24.73s
+    payload build, warm                         9.86s / 9.28s
+    end to end via the real WebSocket           9.8s to first payload
+    observed cadence between payloads           24.0s / 24.1s
+                                                (9.3s build + 15s sleep)
+    duty cycle                                  ~38%  (was ~96%)
+With a client attached: dashboard process ~27% CPU, main.py 1.9%, load
+average 0.62-0.79 -- indistinguishable from the no-client baseline of
+0.74, where before the fix an attached client pushed it to 1.03. Load
+average is noisy at this scale, so the duty-cycle figure is the firmer
+number of the two.
+
+Full history of this tick, for reference:
+    41.2s  original
+    25.5s  after max(ts)/GROUP BY rewrite
+     9.3s  after scoping the orderbook query
+and the ts-leading indexes from earlier contributed nothing measurable,
+for the reasons in the entry above.
+
+NOW THE LARGEST REMAINING COST: _performance_history at 6.95s, roughly
+70% of the 9.3s. Untouched by any of this. It buckets a 336h window
+(PERFORMANCE_HISTORY_LOOKBACK_HOURS) over ~75h of data, so it processes a
+window 4.5x larger than the data that exists. Matching the lookback to
+the run, or widening PERFORMANCE_HISTORY_BUCKET_SECONDS from 300s, would
+cut it directly -- but both change what the chart shows, so neither was
+done. If the build ever drops well under 15s, lower WS_TICK_SECONDS to
+match rather than leaving the dashboard needlessly stale.
+
+Rollback copies on the Droplet: /root/server.py.orig-20261003 (before
+any of today's query work) and /root/server.py.prev-groupby (after the
+GROUP BY rewrite, before the orderbook scoping).
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
