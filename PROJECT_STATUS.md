@@ -1154,6 +1154,52 @@ non-blockers: the B2 lifecycle rule is still unset (bucket grows ~3.5GB
 over the run, pennies) and the B2 master key still wants rotating since
 it was pasted into a chat transcript.
 
+## 2026-10-03: B2 retention set; local copies deleted after verification
+
+RETENTION is now a bucket lifecycle rule on kalshi-db-backups-prod,
+enforced by Backblaze rather than by a script on the host it protects:
+    prefix "paper_trading_"  -> hide at 30 days, delete 1 day later
+Scoped to that prefix ON PURPOSE. A blanket rule (prefix "") was the
+obvious implementation and would have been a trap: it would also have
+expired laptop-era/, which by then was the ONLY copy of the 09-01..09-05
+run, 31 days after upload and with no warning. Anything under
+laptop-era/ is covered by no rule and is retained indefinitely.
+
+LOCAL DELETIONS, 1.1GB -> 56MB. Each was verified redundant first rather
+than assumed:
+  - data/paper_trading.sqlite -- the laptop-era run. The local file had
+    grown 121368576 -> 126562304 bytes since being archived (a read-write
+    open rolled back the stale -journal that was sitting next to it), so
+    a size or hash comparison would have been misleading. Compared row
+    counts and max(ts) across all 11 tables instead: identical in every
+    one. Deleted.
+  - data/paper_trading_backup_20260901_234239.sqlite -- 24246 rows
+    spanning 09-01 20:11:04..23:42:38, entirely inside the archive's
+    range with fewer rows. Redundant. Deleted.
+  - droplet_backups/ (864MB) -- the 09-30 and 10-02 pulls. Both are
+    strict subsets of the 10-03 snapshots already in B2; the live DB is
+    append-only so later snapshots contain them. Deleted.
+    (Their min(ts) appeared 7h earlier than the live DB's at first
+    glance; that was PDT-vs-UTC display in two different scripts, not
+    missing data. Same epoch value.)
+
+AND ONE THAT WAS NOT REDUNDANT. data/paper_trading_contaminated_backup_
+20260901_201057.sqlite looked like obvious junk -- it is literally named
+"contaminated", it is the 09-01 multi-process incident, and the request
+was to delete local laptop-era data. But its 91825 rows span
+09-01 17:21:19..20:10:56, which ends 8 SECONDS BEFORE the archive's
+range begins at 20:11:04. It was the only copy of that window anywhere,
+including the only surviving record of the 9-duplicate-process incident
+itself. Uploaded to laptop-era/ (80.7MB -> 8.0MB, SHA1 confirmed) before
+deleting it locally.
+The general lesson, twice in one task: "contaminated" and "backup" in a
+filename describe someone's intent at the time, not whether the bytes
+are reproducible from somewhere else. Check the time ranges.
+
+Bucket now holds 386MB: 5 run snapshots under the 30-day rule, plus
+22MB of laptop-era archives kept indefinitely. Nothing unique remains on
+the laptop.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
