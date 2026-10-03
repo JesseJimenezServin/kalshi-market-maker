@@ -1200,6 +1200,95 @@ Bucket now holds 386MB: 5 run snapshots under the 30-day rule, plus
 22MB of laptop-era archives kept indefinitely. Nothing unique remains on
 the laptop.
 
+## 2026-10-03 INCIDENT: phantom orderbook levels manufactured the entire reported profit
+
+The dashboard was showing $1162.05 against $1000 starting capital -- +16%
+in three days of passive market making, which is not a plausible return
+and was not a real one. 99.6% of it was an artefact of a float bug.
+
+CAUSE. orderbook.py's apply_delta removed a price level only on
+`new_size <= 0`. Sizes are floats because Kalshi's "_fp" fields are
+genuinely fractional, so a level cancelled down to nothing lands on
+binary residue -- 0.1+0.1+0.1-0.3 is 5.55e-17, not 0.0 -- which is > 0,
+so the level was never popped. It stayed in the book forever at an
+effectively-zero size.
+
+WHY THAT WAS EXPENSIVE. best_yes_bid()/best_no_bid() return max(price)
+over whatever keys exist, with no size test. A phantom at a better price
+therefore became the best bid, and from there it fed everything at once:
+the mid price, the quote placement, the fill test in
+adverse_selection_sim.process_trade_for_inventory
+(`trade_yes_price <= quote.yes_price`), and the mark the P&L was measured
+against. Measured on the live DB:
+    31.6%   of ALL logged price levels were phantoms
+    51208   sampled snapshots where the BEST level was a phantom
+and one concrete snapshot of the biggest winner:
+    best YES bid  seen 12c @ size 2.84e-14   real 9c @ size 634
+    implied mid   seen 11.0c                 real 9.5c   -> 1.5c off
+A 1.5c error on a 10c market is 15%. The reported edge was 0.52c per
+contract ($132.32 over 25459 contracts), so a persistent 1.5c mid
+distortion is more than enough to manufacture all of it.
+
+THE EVIDENCE IS UNAMBIGUOUS. Per-ticker, P&L tracks book corruption and
+nothing else:
+    KXTRUMPAPPROVE-26OCT02-E38.5   46.9% phantom   $132.32
+    KXTRUMPAPPROVE-26OCT02-E38.6   39.2% phantom   $ 18.90
+    KXTRUMPAPPROVE-26OCT02-E38.8   60.3% phantom   $  9.60
+    KXTRUMPAPPROVE-26OCT01-E38.5    0.3% phantom   $  0.63
+    every NFL / MLB market          0.0% phantom   $  0.00
+$161.06 of the $162.04 came from the six markets with >10% phantom
+levels. Every clean book made approximately nothing. It also contaminated
+the REWARD scores, which are the actual point of the project:
+reward_simulator derives our share as our size / level size, and a
+near-zero level inflates that toward 1.0.
+
+FIX.
+- SIZE_EPSILON = 1e-6 in orderbook.py; apply_delta pops on
+  `<= SIZE_EPSILON`. Deliberately a tolerance and NOT integer rounding:
+  11% of real sizes are legitimately fractional (e.g. 5787.01), so
+  coercing to int would corrupt live data to fix a float bug.
+- apply_snapshot filters incoming levels too, so the invariant holds from
+  the first message rather than only after the first delta.
+- All four read paths (best_yes_bid, best_no_bid, yes_side_sorted_desc,
+  no_side_sorted_desc) filter through _live_levels() as well. Redundant
+  given the write sites, but this bug was invisible for days and cost the
+  whole run's headline number; no future write path should be able to
+  reintroduce a phantom best bid silently.
+- Size type annotations corrected from int to float. The wrong annotation
+  is part of why `<= 0` looked safe.
+- FOUR REGRESSION TESTS in test_logic.py, which had none covering level
+  removal: delta-to-exactly-zero, delta-to-float-residue (the real bug,
+  and it FAILS on the old code with "phantom level survived at size
+  5.551115123125783e-17"), snapshot-carrying-a-zero-level, and
+  legitimately-fractional-sizes-preserved. The last one exists
+  specifically to stop someone "simplifying" the fix into rounding.
+CONFIRMED after restarting kalshi-lab so books rebuilt from fresh
+snapshots: 0 phantom levels and 0 phantom best-levels in 3452 levels
+across 518 new snapshots, against 31.6% before.
+
+SECOND, SEPARATE PROBLEM: fixing the bug did NOT clear the fake profit.
+_performance_history freezes a market's last mark and keeps counting it
+forever once it stops logging (deliberate, so a market switch cannot
+cause a phantom balance jump). The six contaminated markets had already
+stopped logging, so their $161 would have sat in the balance chart as a
+floor for the remaining 12 days of a now-correct run.
+Handled with config.CONTAMINATED_TICKERS, excluded at report time in
+_performance_history (both series), the rendered markets table, and
+recent_fills. The rows are NOT deleted -- they are the evidence for this
+entry, and this codebase already prefers documented filters over
+destructive cleanup. Threshold >10% phantom separated cleanly: the six
+excluded are 13.4-60.3%, the next worst is 5.3%.
+Dashboard now reports $1000.99, down from $1162.05.
+
+RESIDUAL, stated rather than hidden: the ~$0.99 that remains was measured
+against books with 0.1-5.3% phantom levels, so it is not clean either --
+treat any small pre-10-03 P&L as noise, not signal. The honest
+measurement window for P&L and reward capture starts 2026-10-03.
+Separately, turnover on the biggest contaminated market was 71x the
+position cap (25459 contracts through a 359-contract limit in ~22h);
+that was never validated against real market volume and still should be,
+independently of this bug.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

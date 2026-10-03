@@ -360,6 +360,35 @@ PERFORMANCE_HISTORY_LOOKBACK_HOURS = 336  # 14 days
 PERFORMANCE_HISTORY_BUCKET_SECONDS = 300  # 5 minutes
 
 # --------------------------------------------------------------------------
+# Contaminated markets (excluded from dashboard P&L / reward reporting)
+# --------------------------------------------------------------------------
+# These markets were watched while the orderbook.py float-residue bug was
+# live (fixed 2026-10-03, see SIZE_EPSILON there and the INCIDENT entry in
+# PROJECT_STATUS.md). Their books were 13-60% phantom levels, so the best
+# bid, the mid, the quote placement, the simulated fills and the P&L mark
+# were all derived from liquidity that did not exist. They account for
+# $161.06 of the $162.04 "profit" the dashboard was reporting; every market
+# with a clean book made approximately nothing.
+#
+# The ROWS ARE DELIBERATELY NOT DELETED -- they are the evidence for that
+# incident, and this codebase already prefers documented filters over
+# destructive cleanup (cf. the ts >= 1790836411 filter for pre-run testing
+# noise). They are excluded at report time instead.
+#
+# Threshold was >10% phantom levels, which separated cleanly: the six below
+# are 13.4-60.3%, the next worst is 5.3%. The kept markets still carry
+# ~$0.99 of P&L measured against books with 0.1-5.3% phantoms, so treat
+# small non-zero P&L from before 2026-10-03 as noise rather than signal.
+CONTAMINATED_TICKERS: frozenset[str] = frozenset({
+    "KXTRUMPAPPROVE-26OCT02-E38.8",  # 60.3% phantom, $9.60
+    "KXTRUMPAPPROVE-26OCT02-E38.5",  # 46.9% phantom, $132.32
+    "KXTRUMPAPPROVE-26OCT02-E38.6",  # 39.2% phantom, $18.90
+    "KXTRUMPAPPROVE-26OCT03-E38.0",  # 38.1% phantom, $0.18
+    "KXTRUMPAPPROVE-26OCT03-U38.0",  # 35.3% phantom, $0.02
+    "KXTRUMPAPPROVE-26OCT03-A38.6",  # 13.4% phantom, $0.04
+})
+
+# --------------------------------------------------------------------------
 # Storage
 # --------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent

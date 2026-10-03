@@ -73,6 +73,68 @@ def test_orderbook_snapshot_and_delta():
     print("test_orderbook_snapshot_and_delta: PASS")
 
 
+def test_orderbook_delta_to_zero_removes_level():
+    """A level cancelled to exactly zero must not stay in the book."""
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[(50, 100.0), (49, 20.0)], no=[(48, 40.0)])
+    book.apply_delta(side="yes", price=50, delta=-100.0)
+    assert 50 not in book.yes_levels, book.yes_levels
+    assert book.best_yes_bid() == (49, 20.0), book.best_yes_bid()
+    print("test_orderbook_delta_to_zero_removes_level: PASS")
+
+
+def test_orderbook_float_residue_does_not_leave_phantom_level():
+    """
+    THE 2026-10-03 BUG. Sizes are floats (Kalshi's _fp fields are
+    fractional), so cancelling a level down to "nothing" lands on binary
+    residue, not 0.0 -- 0.1+0.1+0.1-0.3 is 2.8e-17, not zero. The old
+    `new_size <= 0` test left that level in the book forever, and since
+    best_yes_bid() is max(price) over existing keys, the phantom became the
+    best bid and poisoned the mid, the quote placement, the fill test and
+    the P&L mark all at once.
+    """
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[(9, 634.0)], no=[(90, 182.0)])
+    # A fractional level appears at a BETTER price, then is fully cancelled.
+    for _ in range(3):
+        book.apply_delta(side="yes", price=12, delta=0.1)
+    book.apply_delta(side="yes", price=12, delta=-0.3)
+
+    residue = book.yes_levels.get(12)
+    assert residue is None, f"phantom level survived at size {residue!r}"
+    assert book.best_yes_bid() == (9, 634.0), book.best_yes_bid()
+    assert 12 not in dict(book.yes_side_sorted_desc())
+    print("test_orderbook_float_residue_does_not_leave_phantom_level: PASS")
+
+
+def test_orderbook_preserves_legitimately_fractional_sizes():
+    """
+    Guards the fix against being "simplified" into integer rounding. Kalshi
+    really does send fractional sizes (11% of observed levels), so a size
+    like 5787.01 must survive untouched -- only sub-epsilon residue is
+    dropped.
+    """
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[(50, 5787.01)], no=[(48, 0.25)])
+    assert book.yes_levels[50] == 5787.01, book.yes_levels
+    assert book.no_levels[48] == 0.25, book.no_levels
+    assert book.best_yes_bid() == (50, 5787.01)
+    assert book.best_no_bid() == (48, 0.25)
+    # a small-but-real level is still real
+    book.apply_delta(side="yes", price=51, delta=0.5)
+    assert book.best_yes_bid() == (51, 0.5), book.best_yes_bid()
+    print("test_orderbook_preserves_legitimately_fractional_sizes: PASS")
+
+
+def test_orderbook_snapshot_filters_zero_levels():
+    """A snapshot carrying a zero level must not seed a phantom best bid."""
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[(12, 0.0), (9, 634.0)], no=[(90, 182.0)])
+    assert 12 not in book.yes_levels, book.yes_levels
+    assert book.best_yes_bid() == (9, 634.0), book.best_yes_bid()
+    print("test_orderbook_snapshot_filters_zero_levels: PASS")
+
+
 def test_orderbook_delta_unrecognized_shape_marks_stale_not_crash():
     mgr = OrderbookManager()
     mgr.handle_message({
@@ -1155,6 +1217,10 @@ def test_market_switcher_backs_off_after_failed_search_not_just_successful_switc
 
 if __name__ == "__main__":
     test_orderbook_snapshot_and_delta()
+    test_orderbook_delta_to_zero_removes_level()
+    test_orderbook_float_residue_does_not_leave_phantom_level()
+    test_orderbook_preserves_legitimately_fractional_sizes()
+    test_orderbook_snapshot_filters_zero_levels()
     test_orderbook_delta_unrecognized_shape_marks_stale_not_crash()
     test_orderbook_seq_is_shared_across_tickers_under_one_sid()
     test_reference_price()

@@ -52,6 +52,39 @@ def fp_to_size(size_str) -> float:
     return float(size_str)
 
 
+# A level at or below this size is treated as absent.
+#
+# Sizes are floats because Kalshi's "_fp" fields are genuinely fractional, so
+# a level being cancelled down to nothing does NOT reliably land on exactly
+# 0.0 -- it lands on binary-float residue like 2.8e-14. apply_delta
+# originally popped a level only on `new_size <= 0`, so every such level
+# stayed in the book forever at an effectively-zero size.
+#
+# That was not cosmetic. best_yes_bid()/best_no_bid() return max(price) over
+# whatever keys exist, so a phantom level became the best bid, which fed the
+# mid price, the quote placement, the fill test in
+# adverse_selection_sim.process_trade_for_inventory, AND the mark the P&L is
+# measured against. Measured 2026-10-03 on the live DB: 31.6% of all logged
+# price levels were phantoms, the best level was a phantom in 51208 sampled
+# snapshots, and one book showed a best YES bid of 12c at size 2.8e-14 when
+# the real best bid was 9c with 634 contracts -- a 1.5c mid error on a 10c
+# market. 99.6% of the run's reported $162 "profit" came from the three
+# markets whose books were 39-60% phantoms; every clean-book market made $0.
+#
+# Deliberately a tolerance and NOT integer rounding: 11% of real sizes are
+# legitimately fractional (e.g. 5787.01), so coercing to int would corrupt
+# live data to fix a float-residue bug. 1e-6 is ~11 orders of magnitude
+# above the observed residue and ~6 below the smallest meaningful size.
+SIZE_EPSILON = 1e-6
+
+
+def _live_levels(levels: dict[int, float]) -> dict[int, float]:
+    """Levels with real size. Belt-and-braces: apply_snapshot/apply_delta
+    already maintain this invariant, but every read path filters too, so no
+    future write path can reintroduce a phantom best bid silently."""
+    return {price: size for price, size in levels.items() if size > SIZE_EPSILON}
+
+
 def _parse_dollar_fp_levels(levels: list[list]) -> list[tuple[int, float]]:
     return [(dollars_to_cents(price), fp_to_size(size)) for price, size in levels]
 
@@ -69,8 +102,10 @@ class MarketBook:
     def apply_snapshot(self, sid: int, seq: int, yes: list[tuple[int, float]], no: list[tuple[int, float]]) -> None:
         self.sid = sid
         self.seq = seq
-        self.yes_levels = {price: size for price, size in yes}
-        self.no_levels = {price: size for price, size in no}
+        # Filter here too: a snapshot can legitimately carry a zero level,
+        # and the book invariant should hold from the first message.
+        self.yes_levels = {price: size for price, size in yes if size > SIZE_EPSILON}
+        self.no_levels = {price: size for price, size in no if size > SIZE_EPSILON}
         self.last_update_ts = time.time()
         self.stale = False
 
@@ -83,7 +118,10 @@ class MarketBook:
         """
         levels = self.yes_levels if side == "yes" else self.no_levels
         new_size = levels.get(price, 0) + delta
-        if new_size <= 0:
+        if new_size <= SIZE_EPSILON:
+            # <= EPSILON, not <= 0: float residue from cancelling a
+            # fractional level down to nothing is what created the phantom
+            # levels described at SIZE_EPSILON.
             levels.pop(price, None)
         else:
             levels[price] = new_size
@@ -93,26 +131,28 @@ class MarketBook:
     # ----------------------------------------------------------------
     # Convenience views used by the reward simulator
     # ----------------------------------------------------------------
-    def best_yes_bid(self) -> tuple[int, int] | None:
+    def best_yes_bid(self) -> tuple[int, float] | None:
         """Highest price a YES buyer is resting at. (price_cents, size)"""
-        if not self.yes_levels:
+        live = _live_levels(self.yes_levels)
+        if not live:
             return None
-        price = max(self.yes_levels)
-        return price, self.yes_levels[price]
+        price = max(live)
+        return price, live[price]
 
-    def best_no_bid(self) -> tuple[int, int] | None:
+    def best_no_bid(self) -> tuple[int, float] | None:
         """Highest price a NO buyer is resting at, i.e. lowest implied YES ask."""
-        if not self.no_levels:
+        live = _live_levels(self.no_levels)
+        if not live:
             return None
-        price = max(self.no_levels)
-        return price, self.no_levels[price]
+        price = max(live)
+        return price, live[price]
 
-    def yes_side_sorted_desc(self) -> list[tuple[int, int]]:
+    def yes_side_sorted_desc(self) -> list[tuple[int, float]]:
         """Yes-side resting levels, best (highest) price first."""
-        return sorted(self.yes_levels.items(), key=lambda kv: -kv[0])
+        return sorted(_live_levels(self.yes_levels).items(), key=lambda kv: -kv[0])
 
-    def no_side_sorted_desc(self) -> list[tuple[int, int]]:
-        return sorted(self.no_levels.items(), key=lambda kv: -kv[0])
+    def no_side_sorted_desc(self) -> list[tuple[int, float]]:
+        return sorted(_live_levels(self.no_levels).items(), key=lambda kv: -kv[0])
 
 
 class OrderbookManager:

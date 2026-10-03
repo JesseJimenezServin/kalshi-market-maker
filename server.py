@@ -70,6 +70,24 @@ SimulationLogger()
 RECENT_FILLS_LIMIT = 10
 
 
+def _exclusion_clause(column: str = "ticker") -> tuple[str, list[str]]:
+    """
+    SQL fragment excluding config.CONTAMINATED_TICKERS, plus its parameters.
+
+    Those markets' books were mostly phantom levels (see
+    config.CONTAMINATED_TICKERS), so their P&L is an artefact. They must be
+    excluded at REPORT time rather than deleted, and excluding them matters
+    beyond tidiness: _performance_history freezes a market's last mark and
+    keeps counting it forever once it stops logging, so without this the
+    fake $161 would sit in the balance chart as a floor for the rest of the
+    run even though the underlying bug is fixed.
+    """
+    bad = sorted(config.CONTAMINATED_TICKERS)
+    if not bad:
+        return "", []
+    return f" AND {column} NOT IN ({','.join('?' * len(bad))})", bad
+
+
 def _connect() -> sqlite3.Connection:
     # mode=ro: this process only ever reads (see module docstring), and
     # config.DB_PATH may point at a pulled Droplet backup via
@@ -148,9 +166,14 @@ def _latest_per_ticker(
 
 
 def _recent_fills(conn: sqlite3.Connection, limit: int = RECENT_FILLS_LIMIT) -> list[dict]:
+    # Contaminated markets are excluded here too: their fills came from
+    # phantom liquidity, so showing them in "Recent Simulated Fills" would
+    # present the artefact as activity even though it is out of the P&L.
+    excl_sql, excl_params = _exclusion_clause()
     rows = conn.execute(
-        "SELECT ts, ticker, side, price, size FROM simulated_fills ORDER BY ts DESC LIMIT ?",
-        (limit,),
+        f"SELECT ts, ticker, side, price, size FROM simulated_fills "
+        f"WHERE 1=1{excl_sql} ORDER BY ts DESC LIMIT ?",
+        (*excl_params, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -208,8 +231,10 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     cutoff_ts = time.time() - config.PERFORMANCE_HISTORY_LOOKBACK_HOURS * 3600
     bucket = config.PERFORMANCE_HISTORY_BUCKET_SECONDS
 
+    excl_sql, excl_params = _exclusion_clause()
+
     score_rows = conn.execute(
-        """
+        f"""
         SELECT ts, cumulative FROM (
             SELECT ts,
                    SUM(combined_score) OVER (ORDER BY ts) AS cumulative,
@@ -217,28 +242,28 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
                        PARTITION BY CAST(ts / ? AS INTEGER) ORDER BY ts DESC
                    ) AS rn
             FROM snapshot_scores
-            WHERE ts > ?
+            WHERE ts > ?{excl_sql}
         )
         WHERE rn = 1
         ORDER BY ts ASC
         """,
-        (bucket, cutoff_ts),
+        (bucket, cutoff_ts, *excl_params),
     ).fetchall()
     reward_series = [{"ts": r["ts"], "value": r["cumulative"] or 0.0} for r in score_rows]
 
     pnl_rows = conn.execute(
-        """
+        f"""
         SELECT ts, ticker, unrealized_pnl_cents, realized_pnl_cents FROM (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY ticker, CAST(ts / ? AS INTEGER) ORDER BY ts DESC
             ) AS rn
             FROM inventory_marks
-            WHERE ts > ?
+            WHERE ts > ?{excl_sql}
         )
         WHERE rn = 1
         ORDER BY ts ASC
         """,
-        (bucket, cutoff_ts),
+        (bucket, cutoff_ts, *excl_params),
     ).fetchall()
     # pnl_rows has one row per (ticker, bucket) -- up to num_tickers rows
     # landing in the SAME bucket. Emit exactly one COMBINED point per
@@ -413,6 +438,9 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         active_tickers = {t for t, r in inventory.items() if _is_recent(r, now)} | \
             {t for t, r in quotes.items() if _is_recent(r, now)}
         tickers = sorted(active_tickers) if active_tickers else sorted(set(config.WATCHED_MARKET_TICKERS))
+        # Keep contaminated markets out of the table too, not just the chart,
+        # so a stale row cannot present phantom-derived scores as current.
+        tickers = [t for t in tickers if t not in config.CONTAMINATED_TICKERS]
 
         # Deliberately queried AFTER `tickers` is known, and scoped to it.
         # orderbook_snapshots carries the yes_levels/no_levels blobs, so it
