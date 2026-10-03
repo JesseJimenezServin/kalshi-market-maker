@@ -941,7 +941,40 @@ unattended -- add one with `ssh-keygen -p -f ~/.ssh/kalshi_droplet_admin`,
 and/or remove it from the Droplet once the migration is finished, since
 after that the laptop only needs tunnel access to view the dashboard.
 
-### Step 1: retire the laptop dashboard (no new deployment needed)
+### Step 1: retire the laptop dashboard -- DONE 2026-10-03
+The laptop dashboard is stopped and port 8000 is free. The tunnel was
+verified end to end first: `ssh -L 8001:127.0.0.1:8000` then an HTTP 200
+and a live WebSocket payload from the Droplet's own
+kalshi-dashboard.service showing $1162.05 at 10-02 19:28 local, 894
+balance points, 2 markets, 10 fills -- i.e. the real run, not the 09-05
+corpse the laptop had been serving. KALSHI_DB_PATH is still set in the
+laptop .env; harmless with the local dashboard stopped, and it stays
+until the laptop is fully retired so a local view remains possible if
+needed.
+
+OPEN, found while verifying: the Droplet dashboard takes ~41 SECONDS to
+produce one WebSocket tick, against a design that ticks once per second,
+so it is permanently backlogged and saturates the single vCPU for as
+long as a browser is attached (load average went 0.05 -> 1.03 with one
+client). main.py was still fine at the time, but do not leave the
+dashboard open for long stretches mid-run; it competes with the process
+that is actually collecting the data.
+
+Cause is identified and narrow, NOT yet fixed (a schema change on a live
+940MB DB a third of the way through a run is not worth doing
+unilaterally): server.py's _performance_history filters `WHERE ts > ?`
+with no ticker, but every index in logger.py is composite
+`(ticker, ts)`. SQLite cannot use a composite index for a predicate on
+its second column, so the query plan is a bare `SCAN snapshot_scores`
+over 717k rows (and 759k in inventory_marks), then window functions on
+top. Two ts-leading indexes should fix it:
+    CREATE INDEX IF NOT EXISTS idx_scores_ts ON snapshot_scores(ts);
+    CREATE INDEX IF NOT EXISTS idx_marks_ts  ON inventory_marks(ts);
+Add them to logger.py's schema block so new databases get them, and
+apply once by hand to the live DB. Expect a brief write-lock while each
+builds.
+
+### Original plan for Step 1 (kept for context)
 kalshi-dashboard.service already runs on the Droplet next to the live DB,
 bound to localhost. So this is purely subtractive:
   - view it with:  ssh -L 8000:127.0.0.1:8000 root@<droplet-ip>
