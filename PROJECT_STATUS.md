@@ -314,8 +314,11 @@ sustained data-collection window.
   behavior once we're resting there too, which no snapshot of the public
   book can tell us. True validation requires Phase 1 real fills, not
   fixable in pure simulation.
-- No hosting/deployment yet -- main.py and server.py both currently run
-  locally only.
+- Deployed as of 2026-10-01: main.py runs on the Droplet
+  (kalshi-lab.service), with a localhost-only kalshi-dashboard.service
+  beside it. A laptop dashboard and a laptop-side backup pull also still
+  exist; both are being retired -- see "Target architecture: nothing runs
+  on the laptop" below.
 - Stop-loss events (simulated_stop_losses) now flash-highlight their
   market's row in real time, but still don't appear as rows in the
   "Recent Simulated Fills" table itself -- that panel only reads
@@ -818,15 +821,114 @@ backup SSH key on this laptop deliberately cannot do it (it is
 restricted to the Droplet's forced push_latest_backup.sh command, so no
 general-access credential is stored here).
 
+## Target architecture: nothing runs on the laptop
+
+GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
+process, timer, or stored run data on it that the system depends on. The
+Droplet is the whole system; the laptop can be closed, wiped, or lost
+without affecting the run or the ability to recover it.
+
+Rationale beyond convenience: both 2026-10-02 failures were caused by
+the laptop being load-bearing. A laptop is the worst possible host for
+anything unattended -- it sleeps, it moves networks, and macOS TCC can
+revoke a path's executability (which is exactly what killed the backup
+agent) without anything failing loudly.
+
+### What still runs here (full footprint, audited 2026-10-02)
+1. server.py dashboard, started via ./manage.sh (pid varies), bound
+   127.0.0.1:8000. REDUNDANT -- the Droplet already runs
+   kalshi-dashboard.service.
+2. launchd agent com.kalshi.droplet-backup-pull, daily 10:00, pulls the
+   whole DB over SSH. This is the only piece doing a job nothing else
+   does: it is the off-box copy.
+3. State: droplet_backups/ (848MB), data/ (226MB, the laptop-era
+   09-03..09-05 run), and ~/.ssh/kalshi_droplet_backup.
+Nothing else -- no crontab, no other Kalshi launchd agent, no login
+items. The 5-minute healthcheck and its ntfy.sh alerting already live on
+the Droplet and have no laptop dependency.
+
+### Step 0 (BLOCKER): real SSH access from this laptop
+The only key here is ~/.ssh/kalshi_droplet_backup, which is
+command-restricted to the Droplet's forced push_latest_backup.sh and has
+no shell. It cannot open a tunnel and cannot administer anything. Every
+step below needs ordinary root/sudo access, so first add a normal keypair
+to the Droplet's authorized_keys (via the DigitalOcean web console, or
+from whichever machine the 10-01 deployment was performed from).
+Deliberately NOT done by widening the backup key's permissions: that key
+is restricted precisely so a laptop compromise cannot reach the Droplet,
+and that property is worth keeping.
+
+### Step 1: retire the laptop dashboard (no new deployment needed)
+kalshi-dashboard.service already runs on the Droplet next to the live DB,
+bound to localhost. So this is purely subtractive:
+  - view it with:  ssh -L 8000:127.0.0.1:8000 root@<droplet-ip>
+    then open http://127.0.0.1:8000/ as before
+  - ./manage.sh stop server   on the laptop
+  - drop the KALSHI_DB_PATH line from the laptop .env (the override added
+    on 10-02 exists only to make the *laptop* dashboard non-stale; once
+    the dashboard is viewed on the Droplet it is obsolete)
+This also removes a real cost: pointed at the 662MB Droplet snapshot, the
+laptop dashboard sustained 56-99% CPU, because each tick re-scans a
+336-hour window over a DB that is now ~6x the size it was when those
+queries were written. On the Droplet it reads the live DB locally, but
+note the 1vcpu sizing makes that query cost worth watching there too.
+
+### Step 2: move the off-box backup to a Droplet-side push (the real work)
+The laptop pull must be replaced, not just deleted -- it is the only
+thing protecting against the Droplet's own disk failing. Replace
+"laptop pulls from Droplet" with "Droplet pushes to object storage":
+  - on-box: keep the existing daily sqlite3 .backup(), then
+    `VACUUM INTO` + gzip before upload. SQLite full of numeric rows
+    compresses hard, which matters at the growth rate below.
+  - upload: rclone/aws-cli to an S3-compatible bucket on a cron, with a
+    write-only credential stored on the Droplet.
+  - provider choice: DigitalOcean Spaces is the least work (same
+    console/billing) but shares a blast radius with the Droplet it is
+    insuring. Backblaze B2 or any non-DO S3 target is a genuinely
+    independent failure domain, which is the entire point of an off-box
+    copy. Recommend the independent provider.
+  - retention: enforce with a bucket lifecycle rule, not a shell `rm`.
+  - MUST alert on failure to the existing ntfy.sh topic. The 10-02
+    incident was not "the backup broke", it was "the backup broke and
+    said nothing for two days." A push with no failure alert reproduces
+    that bug in a new location.
+
+### Step 3: remove the laptop timer
+After Step 2 is confirmed uploading: `launchctl unload` then delete
+~/Library/LaunchAgents/com.kalshi.droplet-backup-pull.plist, and mark
+pull_droplet_backup.sh as a manual-only recovery tool (or delete it).
+Order matters -- do not remove the pull before the push is verified, or
+there is a window with exactly one copy of the data.
+
+### Step 4: get the laptop-era data off the laptop
+data/paper_trading.sqlite is the ONLY copy of the 09-03..09-05 run (the
+Droplet never had it). It is superseded for analysis purposes but it is
+still unique data: upload it to the same bucket before deleting anything
+locally. droplet_backups/ can be deleted freely once Step 2 is verified,
+since those are copies of data the Droplet and the bucket both hold.
+
+### Capacity risk to check while doing this (NOT yet verified)
+Measured from two consecutive pulls: 216805376 bytes at 09-30 19:26 ->
+661721088 bytes at 10-02 18:00, i.e. ~229MB/day and not obviously
+linear. A 14-day run from 10-01 therefore lands around 3GB live, and the
+on-box daily backups multiply that by the retention count on a
+1vcpu-1gb Droplet (nyc1, default 25GB disk). Seven retained on-box
+backups of a multi-GB DB will not fit. Check `df -h` and the on-box
+retention policy on the Droplet -- if nothing else, this is a second
+silent-failure candidate of exactly the 10-02 kind, since main.py will
+simply start failing writes when the disk fills.
+
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks
    its own watch list at startup and can switch away mid-run on its own
    (risk engine, reference-price quoting, market switcher armed and
    throttle-fixed, news + event-calendar signals, autonomous selection),
    but has very little real runtime behind it yet.
-2. Deploy main.py to an always-on host (VPS, systemd service) -- not yet
-   started; right now data collection (and the ability to actually pick
-   new markets/switch) stops whenever this laptop is off/asleep.
+2. DONE 2026-10-01: main.py deployed to a DigitalOcean Droplet as a
+   systemd service, so data collection no longer stops when this laptop
+   sleeps. Remaining follow-on: finish removing the laptop from the
+   system entirely (dashboard + off-box backup) -- see "Target
+   architecture: nothing runs on the laptop".
 3. Run continuously for 1-2 weeks minimum, spanning quiet periods and at
    least one volatility event.
 4. Analyze data/paper_trading.sqlite: compare avg snapshot score x period

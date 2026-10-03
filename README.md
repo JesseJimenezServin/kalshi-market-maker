@@ -116,6 +116,27 @@ at least one volatility event) to be meaningful.
 
 ## Step 4 — watch it live in the dashboard
 
+> **Where this should run.** Since 2026-10-01 the real run lives on a
+> DigitalOcean Droplet, and the dashboard runs there too
+> (`kalshi-dashboard.service`, bound to localhost). View it over an SSH
+> tunnel rather than starting a second copy locally:
+>
+> ```bash
+> ssh -L 8000:127.0.0.1:8000 root@<droplet-ip>
+> ```
+>
+> A dashboard started on your laptop reads your laptop's
+> `data/paper_trading.sqlite`, which is NOT the live run's database --
+> on 2026-10-02 that silently showed a run that had stopped four weeks
+> earlier. If you do need a local view of the Droplet's data, point
+> `KALSHI_DB_PATH` at a pulled snapshot (see `.env.example`) and accept
+> that it lags the last backup. The laptop is being removed from the
+> system entirely -- see "Target architecture" in PROJECT_STATUS.md.
+
+The local commands below still apply when you are running the whole
+pipeline on one machine (initial setup, development, or a self-contained
+replication):
+
 ```bash
 ./manage.sh start server
 ```
