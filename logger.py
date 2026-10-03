@@ -160,6 +160,22 @@ CREATE INDEX IF NOT EXISTS idx_stop_losses_ticker_ts ON simulated_stop_losses(ti
 CREATE INDEX IF NOT EXISTS idx_news_events_ticker_ts ON news_events(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ticker_ts ON quote_snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_market_switches_ts ON market_switches(ts);
+
+-- ts-leading indexes for server.py's _performance_history, which filters
+-- `WHERE ts > ?` with no ticker. The (ticker, ts) indexes above cannot serve
+-- that: SQLite will not use a composite index for a predicate on its second
+-- column, so those queries were full table scans (CONFIRMED 2026-10-03 via
+-- EXPLAIN QUERY PLAN: `SCAN snapshot_scores` before, `SEARCH ... USING INDEX
+-- idx_scores_ts (ts>?)` after).
+--
+-- Measured honestly: adding these did NOT speed up the dashboard today,
+-- because PERFORMANCE_HISTORY_LOOKBACK_HOURS is 336h while the run had only
+-- 74.7h of data, so `ts > cut` matched every row and an index range scan
+-- over all rows is no cheaper than a table scan. They start paying off once
+-- a run exceeds the lookback window. Kept because the plan is correct and
+-- they cost ~25MB on a ~1GB database.
+CREATE INDEX IF NOT EXISTS idx_scores_ts ON snapshot_scores(ts);
+CREATE INDEX IF NOT EXISTS idx_marks_ts ON inventory_marks(ts);
 CREATE INDEX IF NOT EXISTS idx_event_calendar_ticker_ts ON event_calendar_snapshots(ticker, ts);
 """
 

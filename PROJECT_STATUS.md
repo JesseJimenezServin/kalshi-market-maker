@@ -960,19 +960,57 @@ client). main.py was still fine at the time, but do not leave the
 dashboard open for long stretches mid-run; it competes with the process
 that is actually collecting the data.
 
-Cause is identified and narrow, NOT yet fixed (a schema change on a live
-940MB DB a third of the way through a run is not worth doing
-unilaterally): server.py's _performance_history filters `WHERE ts > ?`
-with no ticker, but every index in logger.py is composite
-`(ticker, ts)`. SQLite cannot use a composite index for a predicate on
-its second column, so the query plan is a bare `SCAN snapshot_scores`
-over 717k rows (and 759k in inventory_marks), then window functions on
-top. Two ts-leading indexes should fix it:
-    CREATE INDEX IF NOT EXISTS idx_scores_ts ON snapshot_scores(ts);
-    CREATE INDEX IF NOT EXISTS idx_marks_ts  ON inventory_marks(ts);
-Add them to logger.py's schema block so new databases get them, and
-apply once by hand to the live DB. Expect a brief write-lock while each
-builds.
+UPDATE 2026-10-03: the two ts-leading indexes were applied, and they did
+NOT fix it. Recording the real numbers because the original diagnosis
+above was only half right.
+
+Applied idx_scores_ts and idx_marks_ts to the live DB (services stopped
+first: journal_mode is `delete`, not WAL, so CREATE INDEX takes an
+exclusive lock, and logger.py connects with Python's default 5s
+busy_timeout -- long enough to throw "database is locked" at main.py if
+the build overran it). Build took 1.39s and 1.94s, DB grew 943MB ->
+968MB, collection gap ~1 minute, main.py resumed writing within 1s with
+no warnings. Added to logger.py's schema block so new databases get them.
+
+EXPLAIN QUERY PLAN confirms they are used (`SCAN snapshot_scores` ->
+`SEARCH snapshot_scores USING INDEX idx_scores_ts (ts>?)`), but the
+dashboard payload went 39.79s -> 39.51s, i.e. unchanged. Two reasons:
+  1. PERFORMANCE_HISTORY_LOOKBACK_HOURS is 336h and the run had 74.7h of
+     data, so `ts > cut` matches EVERY row. An index range scan over all
+     rows is no cheaper than a table scan. These indexes only start
+     paying off once a run exceeds the lookback window -- kept for that
+     reason, at ~25MB on a ~1GB DB.
+  2. _performance_history was never the bulk of the cost anyway.
+
+Measured breakdown of the 39.79s, which is where the real fix lies:
+    _latest_per_ticker(orderbook_snapshots)   12.84s
+    _performance_history                       7.00s
+    _latest_per_ticker(quote_snapshots)        5.34s
+    _qualifying_counts                         2.67s
+    _latest_per_ticker(snapshot_scores)        2.60s
+    _latest_per_ticker(inventory_marks)        2.52s
+_latest_per_ticker accounts for ~23s of it and no ts index can help it:
+it has no WHERE clause at all. It computes
+`ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY ts DESC)` across the
+ENTIRE table and then keeps rn=1, so it reads every row of every table
+on every tick just to find the newest row per ticker.
+
+NOT YET APPLIED, but measured read-only on the live DB -- rewriting it as
+`SELECT ..., max(ts) FROM {table} GROUP BY ticker`, which can use the
+existing (ticker, ts) indexes:
+    quote_snapshots       7.15s -> 1.00s   (7x)
+    inventory_marks       4.61s -> 0.90s   (5x)
+    snapshot_scores       4.33s -> 0.80s   (5x)
+    orderbook_snapshots  11.89s -> 8.29s   (1.4x only -- wide table, and
+                                            the query does SELECT *)
+Equivalence was checked rather than assumed: the aggregates agree on all
+31 tickers. An initial comparison appeared to disagree on 3 rows, but
+those were the 3 currently-watched tickers and the gap was ~3.2s of
+main.py writes landing between the two queries, plus `SELECT *, max(ts)
+AS ts` yielding two columns named ts. Worth ~16s of the 39s; the
+orderbook case wants narrower column selection too, not just the
+rewrite. This is a server.py code change rather than a schema change, so
+it carries no write-lock risk to the run.
 
 ### Original plan for Step 1 (kept for context)
 kalshi-dashboard.service already runs on the Droplet next to the live DB,
