@@ -122,8 +122,23 @@ at least one volatility event) to be meaningful.
 > tunnel rather than starting a second copy locally:
 >
 > ```bash
-> ssh -L 8000:127.0.0.1:8000 root@<droplet-ip>
+> ssh kalshi-dash      # then open http://localhost:8000/
 > ```
+>
+> `kalshi-dash` is an entry in `~/.ssh/config` that points at the Droplet
+> and carries `LocalForward 8000 127.0.0.1:8000`, so one command opens the
+> shell and the tunnel together. The long form is
+> `ssh -i ~/.ssh/kalshi_droplet_admin -L 8000:127.0.0.1:8000 root@<droplet-ip>`.
+> There is also a plain `kalshi` entry with no forward, for admin work.
+>
+> The dashboard is bound to 127.0.0.1 ON the Droplet and is not reachable
+> from the internet; the tunnel is the only way in. Keep the SSH session
+> open while viewing -- closing it closes the tunnel.
+>
+> Expect the first chart to appear up to ~25s after the page loads, and to
+> refresh about every 24s thereafter (a payload build costs ~9s and
+> `WS_TICK_SECONDS` is 15s). That is deliberate: at a 1s tick the build
+> saturated the Droplet's single vCPU and starved the collector.
 >
 > A dashboard started on your laptop reads your laptop's
 > `data/paper_trading.sqlite`, which is NOT the live run's database --
