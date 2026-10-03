@@ -958,6 +958,69 @@ the environment wins, verified both ways. A verification step that
 cannot fail is worse than no verification step, which is the same lesson
 as the 10-02 silent backup failure in a new costume.
 
+## 2026-10-03: _latest_per_ticker rewritten -- helps, does not fix
+
+Applied the max(ts)/GROUP BY rewrite to server.py's _latest_per_ticker.
+Correct and verified, but it did NOT fix the dashboard CPU load, and the
+gap between the isolated benchmark and the live result is the useful
+part of this entry.
+
+EQUIVALENCE, checked properly: compared old vs new for all five real call
+sites with their actual column lists, against a STATIC copy (a
+decompressed on-box backup, not the live DB -- an earlier comparison
+against the live file produced a phantom mismatch that was just main.py
+writing between the two queries). Results byte-identical for every call
+site, 28-29 tickers each.
+
+Benchmarked on that static copy, the rewrite looked like a 10x win:
+    snapshot_scores              7.84s -> 0.72s
+    inventory_marks              6.97s -> 0.69s
+    incentive_program_snapshots  0.03s -> 0.00s
+    quote_snapshots              6.65s -> 1.00s
+    orderbook_snapshots         11.32s -> 8.50s
+
+On the LIVE box it is far less, because the static benchmark had no
+competing writer and a warm cache to itself:
+    _performance_history                     7.00s -> 6.93s  (untouched)
+    _qualifying_counts                       2.67s -> 2.37s  (untouched)
+    _latest_per_ticker(snapshot_scores)      2.60s -> 0.70s
+    _latest_per_ticker(inventory_marks)      2.52s -> 2.84s  (noise/contention)
+    _latest_per_ticker(quote_snapshots)      5.34s -> 4.19s
+    _latest_per_ticker(orderbook_snapshots) 12.84s -> 8.59s
+End to end through the real WebSocket path: 41.2s -> 25.5s per tick.
+Better, and strictly less work, but not a fix. Kept.
+
+WHY IT IS NOT A FIX, and what would be. ws_endpoint does
+`build_dashboard_payload()` then `await asyncio.sleep(1.0)`, i.e. it is
+designed to tick once a second. A tick costs ~25s. So while any browser
+is attached the loop is ~96% busy and the 1s sleep is irrelevant -- the
+box is saturated by the build itself, and no plausible per-query speedup
+closes a 25x gap. In rough order of leverage:
+  1. Raise the tick interval (one line). At 25s/tick the dashboard is
+     already effectively refreshing every ~26s; sleeping 15-30s between
+     builds would make that explicit and hand the vCPU back to main.py
+     in between. Highest leverage, lowest risk, no query changes.
+  2. _performance_history is now the single largest component at 6.9s and
+     the rewrite does not touch it. PERFORMANCE_HISTORY_LOOKBACK_HOURS is
+     336h against ~75h of data, so it buckets a window 4.5x larger than
+     the data; matching the lookback to the run, or widening
+     PERFORMANCE_HISTORY_BUCKET_SECONDS, cuts it directly.
+  3. orderbook_snapshots is 8.6s because of its yes_levels/no_levels
+     blobs, not the row scan -- GROUP BY still walks the whole index.
+     Fetching only the 3 CURRENTLY-WATCHED tickers with
+     `ORDER BY ts DESC LIMIT 1` per ticker would be ~3 index seeks
+     instead of a 780k-entry walk. The dashboard renders 3 markets but
+     this query returns 29.
+  4. Cache the payload server-side and let all clients share one build.
+None of these were done: the ask was specifically the GROUP BY rewrite,
+and 1-3 each change behaviour (refresh rate, chart window, which tickers
+appear) rather than being pure optimisations.
+
+Note on expectations: the 5-7x figures I reported before applying this
+came from the static benchmark. I should have said they were measured
+without a concurrent writer, because that turned out to be most of the
+difference.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

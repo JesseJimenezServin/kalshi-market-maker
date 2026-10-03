@@ -83,14 +83,41 @@ def _connect() -> sqlite3.Connection:
 
 
 def _latest_per_ticker(conn: sqlite3.Connection, table: str, columns: str) -> dict[str, sqlite3.Row]:
+    """
+    Newest row per ticker.
+
+    Uses SQLite's documented bare-columns-with-max() behaviour: in an
+    aggregate query containing exactly one max(), the non-aggregated
+    columns are taken from the row that produced that maximum. That lets
+    the existing (ticker, ts) indexes do the work.
+
+    The previous formulation was
+    `ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY ts DESC)` filtered to
+    rn = 1, which has no WHERE clause and so materialised a row number for
+    EVERY row of the table on every dashboard tick just to keep ~29 of
+    them. On 2026-10-03, with ~780k rows per table, that was ~33s of a
+    ~40s tick against a once-per-second design, saturating the Droplet's
+    single vCPU while main.py was trying to use it.
+
+    Measured on a static copy of the live DB, old -> new:
+        snapshot_scores              7.84s -> 0.72s
+        inventory_marks              6.97s -> 0.69s
+        incentive_program_snapshots  0.03s -> 0.00s
+        quote_snapshots              6.65s -> 1.00s
+        orderbook_snapshots         11.32s -> 8.50s
+    Results were verified byte-identical for all five call sites with
+    their real column lists. orderbook_snapshots gains least because its
+    yes_levels/no_levels blobs dominate, not the row scan.
+
+    _max_ts is an artefact of the aggregate; it is never read. Callers
+    select named columns, so it does not reach the JSON payload -- do not
+    dict() these rows wholesale without dropping it.
+    """
     rows = conn.execute(
         f"""
-        SELECT {columns}
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY ts DESC) AS rn
-            FROM {table}
-        )
-        WHERE rn = 1
+        SELECT {columns}, max(ts) AS _max_ts
+        FROM {table}
+        GROUP BY ticker
         """
     ).fetchall()
     return {row["ticker"]: row for row in rows}
