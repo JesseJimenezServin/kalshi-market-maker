@@ -12,7 +12,7 @@
 
 set -u
 
-DEST_DIR="/Users/jessejimenez/Downloads/kalshi_liquidity_lab/droplet_backups"
+DEST_DIR="/Users/jessejimenez/projects/kalshi_liquidity_lab/droplet_backups"
 KEEP_LAST=7
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 DEST_FILE="${DEST_DIR}/paper_trading_${TIMESTAMP}.sqlite"
@@ -29,6 +29,13 @@ if ssh -i ~/.ssh/kalshi_droplet_backup -o ConnectTimeout=15 -o StrictHostKeyChec
         exit 1
     fi
     echo "$(date): pulled ${DEST_FILE} (${SIZE} bytes)" >> "$LOG_FILE"
+    # Repoint the stable "latest" name at the pull we just made, so a
+    # dashboard configured with KALSHI_DB_PATH=.../paper_trading_latest.sqlite
+    # picks up each new pull without anyone editing .env. A symlink (not a
+    # copy) keeps this O(1) and avoids a second 600MB+ on disk; it always
+    # targets the newest file, which the KEEP_LAST rotation below never
+    # removes, so it cannot be left dangling.
+    ln -sfn "$(basename "$DEST_FILE")" "${DEST_DIR}/paper_trading_latest.sqlite"
 else
     echo "$(date): pull FAILED (Droplet unreachable or key rejected)" >> "$LOG_FILE"
     rm -f "$DEST_FILE"

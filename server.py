@@ -71,7 +71,13 @@ RECENT_FILLS_LIMIT = 10
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(config.DB_PATH))
+    # mode=ro: this process only ever reads (see module docstring), and
+    # config.DB_PATH may point at a pulled Droplet backup via
+    # KALSHI_DB_PATH. Opening read-write would let SQLite create a -wal/
+    # -journal beside a snapshot we want left byte-for-byte intact, and
+    # would silently create an empty DB if the path were ever wrong --
+    # read-only turns that into a loud error instead.
+    conn = sqlite3.connect(f"file:{config.DB_PATH.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 

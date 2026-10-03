@@ -365,7 +365,22 @@ PERFORMANCE_HISTORY_BUCKET_SECONDS = 300  # 5 minutes
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "logs"
-DB_PATH = DATA_DIR / "paper_trading.sqlite"
+
+# DB_PATH defaults to the database main.py writes on whichever box it runs
+# on. KALSHI_DB_PATH overrides it so a dashboard can be pointed at a
+# different, already-populated database -- specifically, a snapshot pulled
+# down by pull_droplet_backup.sh. Without this, running server.py on a
+# laptop while main.py runs on the Droplet silently serves whatever stale
+# local data/paper_trading.sqlite happens to exist (on 2026-10-02 that was
+# a run that had stopped on 09-05, so the dashboard showed 3 simulated
+# fills while the Droplet was at 2494 -- see PROJECT_STATUS.md).
+# Leave it unset on the box that actually runs main.py.
+_DB_PATH_OVERRIDE = os.getenv("KALSHI_DB_PATH", "").strip()
+DB_PATH = (
+    Path(_DB_PATH_OVERRIDE).expanduser()
+    if _DB_PATH_OVERRIDE
+    else DATA_DIR / "paper_trading.sqlite"
+)
 
 DATA_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)

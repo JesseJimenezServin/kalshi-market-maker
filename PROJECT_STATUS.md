@@ -749,6 +749,75 @@ visibly the ~10,778-row pre-fix news_events flood and the 50 pre-fix
 market_switches from the continuous-re-optimizer incident, neither of
 which reflects real running conditions going forward.
 
+## 2026-10-02 INCIDENT: off-box backup silently dead, dashboard silently stale
+
+Two independent silent failures, both found while asking why the
+dashboard's PORTFOLIO BALANCE did not match the real account. Neither
+had surfaced an alert anywhere, and both were invisible from the
+dashboard itself -- it kept rendering a plausible-looking balance the
+whole time.
+
+(0) Pre-note on the question that started it: PORTFOLIO BALANCE is not,
+and never was, a Kalshi account balance. server.py computes it as
+config.STARTING_CAPITAL_USD + simulated pnl_dollars -- a hardcoded
+$1000.00 base plus paper P&L (the docstring calls it "the pretend
+account balance"). rest_client.get_balance() does hit the real
+/portfolio/balance endpoint, but no dashboard code path calls it. This
+is working as designed; it is only confusing because the tile is
+labelled in dollars with no "simulated" marker.
+
+(1) BACKUP DEAD SINCE 09-30 19:40. The repo lived in ~/Downloads, which
+macOS protects under TCC. The launchd agent
+(com.kalshi.droplet-backup-pull) therefore could not execute
+pull_droplet_backup.sh at all: every firing failed instantly with
+"/bin/bash: ...: Operation not permitted" and exit code 126, appending
+to droplet_backups/launchd.log while pull.log stayed frozen at its last
+success. So the off-box copy stopped the same evening the official
+unattended run was marked as started, and the 09-30 -> 10-02 window had
+no second copy anywhere.
+FIX: moved the repo to ~/projects/kalshi_liquidity_lab (out of the
+TCC-protected folder) and updated the only two places that hardcoded the
+old absolute path -- DEST_DIR here and the three path strings in
+~/Library/LaunchAgents/com.kalshi.droplet-backup-pull.plist. config.py
+derives everything from BASE_DIR = Path(__file__).parent, so nothing
+else needed touching, and the venv survived the move unchanged.
+CONFIRMED: launchctl kickstart now exits 0 with an empty launchd.log,
+and pulled a 661721088-byte snapshot (integrity_check: ok, data through
+10-02 02:00) at the new path.
+
+(2) DASHBOARD SERVING A RUN THAT DIED ON 09-05. main.py runs on the
+Droplet; server.py runs on the laptop. But server.py read
+config.DB_PATH, which was unconditionally the LOCAL
+data/paper_trading.sqlite -- last written 09-05 14:42, when this laptop
+was still the host. The laptop dashboard had been showing a ~4-week-old
+dead run while the Droplet accumulated the real one, and nothing
+indicated the staleness:
+    LOCAL   (what the dashboard showed)  snapshot_scores 153280, simulated_fills     3, latest 2026-09-05 14:40
+    DROPLET (the actual run)             snapshot_scores 256975, simulated_fills  1237, latest 2026-09-30 19:24
+FIX: config.DB_PATH now honours an optional KALSHI_DB_PATH override,
+defaulting to the old DATA_DIR path when unset -- so main.py on the
+Droplet is unaffected (CONFIRMED by importing config.py with a
+Droplet-style .env that omits the var: DB_PATH falls back to
+<repo>/data/paper_trading.sqlite). The override is set only in this
+laptop's gitignored .env, pointing at
+droplet_backups/paper_trading_latest.sqlite, which
+pull_droplet_backup.sh now repoints (symlink, not a copy) after every
+successful pull, so the dashboard follows new snapshots with no further
+edits. server.py also opens the DB mode=ro now: it only ever reads, and
+must not drop a -wal/-journal next to a backup snapshot or quietly
+create an empty DB if the path is ever wrong.
+CONFIRMED over the live WebSocket after the change: 685 balance points
+spanning 09-29 17:04 -> 10-02 02:00, $1000.00 -> $1106.87, 10 recent
+fills, 3 markets. test_logic.py: ALL TESTS PASSED.
+
+Residual limitation, by design: the laptop dashboard now shows the
+Droplet's run as of the last pull, not live -- the launchd agent fires
+daily at 10:00, so the view can lag up to ~24h. A live view would mean
+running server.py on the Droplet next to main.py; not done, and the
+backup SSH key on this laptop deliberately cannot do it (it is
+restricted to the Droplet's forced push_latest_backup.sh command, so no
+general-access credential is stored here).
+
 ## Next steps (in order)
 1. Let the live run actually accumulate data -- the pipeline now picks
    its own watch list at startup and can switch away mid-run on its own
