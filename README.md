@@ -246,3 +246,5 @@ forecast) while we tighten the model with real observed data.
 | `server.py` | Read-only FastAPI dashboard, streams `data/paper_trading.sqlite` over `/ws` |
 | `templates/dashboard.html` | Dashboard single-page UI (markets, depth, fills, chart) |
 | `test_logic.py` | Offline unit tests (no network needed) |
+| `deploy/` | Droplet-side artifacts: off-box backup push, systemd units, install steps |
+| `pull_droplet_backup.sh` | **Being retired** -- laptop-side backup pull, replaced by `deploy/push_offbox_backup.sh` |

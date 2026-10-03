@@ -1,0 +1,119 @@
+#!/bin/bash
+# Off-box backup PUSH -- runs ON THE DROPLET, uploads a compressed snapshot
+# of the live database to an S3-compatible bucket.
+#
+# This replaces pull_droplet_backup.sh, which ran on a laptop. That design
+# failed on 2026-09-30: the laptop's launchd agent could not execute the
+# script (macOS TCC, repo lived in ~/Downloads) and the failure was visible
+# only in a local log nobody reads, so the off-box copy silently stopped for
+# two days during an unattended run. The lessons encoded here:
+#   - the host that owns the data owns the backup (no second machine to fail)
+#   - EVERY failure path alerts; silence must mean success, not "unknown"
+#   - never let the backup itself be the thing that fills the disk
+#
+# Install: see deploy/README.md. Config lives in /etc/kalshi-offbox.env
+# (credentials -- not in git).
+
+set -uo pipefail
+
+CONFIG_FILE="${KALSHI_OFFBOX_CONFIG:-/etc/kalshi-offbox.env}"
+# shellcheck source=/dev/null
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+: "${DB_PATH:=/opt/kalshi_liquidity_lab/data/paper_trading.sqlite}"
+: "${RCLONE_REMOTE:?RCLONE_REMOTE not set (e.g. offbox:kalshi-lab-backups)}"
+: "${NTFY_TOPIC:?NTFY_TOPIC not set -- failure alerting is mandatory, see header}"
+: "${NTFY_URL:=https://ntfy.sh}"
+: "${STAGING_DIR:=/var/tmp}"
+: "${KEEP_LOCAL_STAGING:=0}"
+
+LOG_TAG="kalshi-offbox"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAGING_DB="${STAGING_DIR}/paper_trading_${TIMESTAMP}.sqlite"
+STAGING_GZ="${STAGING_DB}.gz"
+
+log() { echo "$(date -u +%FT%TZ) $*"; logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; }
+
+alert() {
+    # Fire-and-forget, but never let a failed alert mask the real error.
+    curl -fsS --max-time 20 \
+        -H "Title: Kalshi off-box backup FAILED" \
+        -H "Priority: urgent" \
+        -H "Tags: rotating_light" \
+        -d "$1" "${NTFY_URL}/${NTFY_TOPIC}" >/dev/null 2>&1 \
+        || log "WARNING: could not deliver ntfy alert"
+}
+
+cleanup() { [ "$KEEP_LOCAL_STAGING" = "1" ] || rm -f "$STAGING_DB" "$STAGING_GZ"; }
+
+fail() {
+    log "FAILED: $1"
+    alert "$(printf '%s\n\nhost: %s\nsource: %s\nremote: %s' \
+        "$1" "$(hostname)" "$DB_PATH" "$RCLONE_REMOTE")"
+    cleanup
+    exit 1
+}
+trap 'fail "unexpected error on line $LINENO"' ERR
+
+log "starting push (source=$DB_PATH remote=$RCLONE_REMOTE)"
+
+[ -r "$DB_PATH" ] || fail "source DB missing or unreadable: $DB_PATH"
+command -v rclone  >/dev/null || fail "rclone not installed"
+command -v sqlite3 >/dev/null || fail "sqlite3 not installed"
+
+# Staleness check. A backup that faithfully uploads a dead database is the
+# 2026-10-02 dashboard bug in backup form -- worth alerting on, because
+# main.py having stopped is strictly worse news than the backup failing.
+DB_AGE_S=$(( $(date +%s) - $(stat -c %Y "$DB_PATH") ))
+: "${MAX_DB_AGE_S:=3600}"
+if [ "$DB_AGE_S" -gt "$MAX_DB_AGE_S" ]; then
+    alert "$(printf 'Source DB has not been written for %ss (limit %ss) -- main.py may be dead. Backup still attempted.\n\nhost: %s' \
+        "$DB_AGE_S" "$MAX_DB_AGE_S" "$(hostname)")"
+    log "WARNING: source DB is ${DB_AGE_S}s stale -- alerted, continuing"
+fi
+
+# VACUUM INTO needs free space roughly equal to the DB size, and this box is
+# a 1vcpu-1gb Droplet whose disk also holds the on-box backup retention.
+# Checking first turns "disk full mid-write, DB possibly wedged" into a clean
+# alert. Require the DB size plus a 20% margin.
+DB_BYTES=$(stat -c %s "$DB_PATH")
+FREE_BLOCKS=$(stat -f --format="%a" "$STAGING_DIR")
+BLOCK_SIZE=$(stat -f --format="%S" "$STAGING_DIR")
+FREE_BYTES=$(( FREE_BLOCKS * BLOCK_SIZE ))
+NEED_BYTES=$(( DB_BYTES + DB_BYTES / 5 ))
+if [ "$FREE_BYTES" -lt "$NEED_BYTES" ]; then
+    fail "insufficient free space in $STAGING_DIR: need ~${NEED_BYTES}B, have ${FREE_BYTES}B (DB is ${DB_BYTES}B)"
+fi
+
+# VACUUM INTO (not a file copy): takes a consistent snapshot of a live DB
+# without blocking main.py's writers, and compacts it at the same time.
+log "snapshotting ${DB_BYTES} bytes via VACUUM INTO"
+sqlite3 "file:${DB_PATH}?mode=ro" "VACUUM INTO '${STAGING_DB}'" \
+    || fail "VACUUM INTO failed (disk full, or DB corrupt)"
+
+sqlite3 "file:${STAGING_DB}?mode=ro" "PRAGMA integrity_check" 2>/dev/null \
+    | head -1 | grep -qx "ok" \
+    || fail "snapshot failed integrity_check -- not uploading a corrupt backup"
+
+log "compressing"
+gzip -6 "$STAGING_DB" || fail "gzip failed"
+GZ_BYTES=$(stat -c %s "$STAGING_GZ")
+
+log "uploading ${GZ_BYTES} bytes to ${RCLONE_REMOTE}"
+rclone copyto "$STAGING_GZ" "${RCLONE_REMOTE}/paper_trading_${TIMESTAMP}.sqlite.gz" \
+    --s3-no-check-bucket --retries 3 --low-level-retries 10 --stats-one-line \
+    || fail "rclone upload failed (credentials, network, or bucket policy)"
+
+# Verify by reading the object back, not by trusting the exit code.
+REMOTE_BYTES=$(rclone size "${RCLONE_REMOTE}/paper_trading_${TIMESTAMP}.sqlite.gz" --json 2>/dev/null \
+    | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
+[ "$REMOTE_BYTES" = "$GZ_BYTES" ] \
+    || fail "post-upload size mismatch: local ${GZ_BYTES}B vs remote ${REMOTE_BYTES:-missing}B"
+
+trap - ERR
+cleanup
+log "OK: uploaded paper_trading_${TIMESTAMP}.sqlite.gz (${GZ_BYTES} bytes from ${DB_BYTES} bytes raw)"
+
+# NOTE: retention is deliberately NOT done here. Use a bucket lifecycle rule
+# so expiry is enforced by the storage provider even if this host is gone --
+# a shell `rm` can only run while the thing it protects against is healthy.

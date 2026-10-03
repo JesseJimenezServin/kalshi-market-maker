@@ -21,6 +21,8 @@ sustained data-collection window.
   python-dotenv (fixed 2026-08-31)
 
 ## Architecture (file map)
+- deploy/ -- Droplet-side artifacts (off-box backup push + systemd
+  units + install steps). Written 2026-10-02, NOT yet deployed.
 - config.py -- environment, watch list, thresholds, loads .env
 - auth.py -- RSA-PSS request signing
 - rest_client.py -- REST wrapper, GET-only, no order-placement methods
@@ -858,6 +860,14 @@ Deliberately NOT done by widening the backup key's permissions: that key
 is restricted precisely so a laptop compromise cannot reach the Droplet,
 and that property is worth keeping.
 
+PREPARED 2026-10-02: an ordinary admin keypair now exists at
+~/.ssh/kalshi_droplet_admin (ed25519). Its public half needs adding to
+the Droplet's root authorized_keys, after which every step below can
+proceed. It was generated WITHOUT a passphrase so the migration can run
+unattended -- add one with `ssh-keygen -p -f ~/.ssh/kalshi_droplet_admin`,
+and/or remove it from the Droplet once the migration is finished, since
+after that the laptop only needs tunnel access to view the dashboard.
+
 ### Step 1: retire the laptop dashboard (no new deployment needed)
 kalshi-dashboard.service already runs on the Droplet next to the live DB,
 bound to localhost. So this is purely subtractive:
@@ -892,6 +902,25 @@ thing protecting against the Droplet's own disk failing. Replace
     incident was not "the backup broke", it was "the backup broke and
     said nothing for two days." A push with no failure alert reproduces
     that bug in a new location.
+
+WRITTEN 2026-10-02, NOT YET DEPLOYED: deploy/push_offbox_backup.sh plus
+kalshi-offbox-backup.{service,timer}, a config example, and install steps
+in deploy/README.md. It implements all of the above: free-space precheck
+before VACUUM INTO (so the backup cannot be what fills the disk),
+integrity_check on the snapshot before upload, read-back size
+verification rather than trusting rclone's exit code, ntfy alert on every
+failure path via an ERR trap, and a separate alert if the source DB has
+gone stale (a backup faithfully archiving a dead main.py is still bad
+news). Retention is left to a bucket lifecycle rule on purpose.
+Syntax-checked only -- it targets Linux and cannot run on macOS, so the
+first run must be done by hand on the Droplet and watched.
+
+Also noted while writing it: backup_db.py, push_latest_backup.sh, the
+healthcheck, both systemd units, root's crontab and the authorized_keys
+forced-command entry exist ONLY on the Droplet and are in no repository.
+If that disk failed, the recovery procedure would be lost with the thing
+it recovers. Copy them into deploy/ and commit -- listed at the bottom of
+deploy/README.md.
 
 ### Step 3: remove the laptop timer
 After Step 2 is confirmed uploading: `launchctl unload` then delete

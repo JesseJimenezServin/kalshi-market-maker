@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily off-box push of the Kalshi Liquidity Lab database
+
+[Timer]
+# Daily, shortly after the existing on-box backup. RandomizedDelaySec keeps
+# this off the exact hour; Persistent=true makes a missed run (reboot, host
+# maintenance) fire on next boot instead of being skipped silently -- the
+# whole point is that a gap must never go unnoticed.
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
