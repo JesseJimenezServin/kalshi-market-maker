@@ -1289,6 +1289,90 @@ position cap (25459 contracts through a 359-contract limit in ~22h);
 that was never validated against real market volume and still should be,
 independently of this bug.
 
+## 2026-10-04 INCIDENT: bot sat on three SETTLED markets for 4.4 hours
+
+Found during a status check. kalshi-lab was "active", logging news and
+refreshing the incentive screen, with the Kalshi WebSocket connected --
+and producing no usable data at all since 16:32:04 UTC.
+
+The three watched markets were KXTRUMPAPPROVE-26OCT04-{E38.0, E38.1,
+U37.9}, all `status=finalized`, closed 2026-10-04T16:59:00Z (CONFIRMED
+against the API, not inferred). Their books were empty on both sides.
+
+WHY NOTHING CAUGHT IT. scoring_loop logged the orderbook snapshot BEFORE
+testing for a usable mid, then hit `if best_yes is None or best_no is
+None: continue` -- so it wrote an empty row every tick and skipped
+snapshot_scores, inventory_marks and quote_snapshots entirely. 41856 of
+46649 orderbook rows written in those 4.4h were empty (90%, ~229k/day of
+pure bloat).
+
+And the switcher would not leave, for a reason worth remembering:
+EVERY QUALITY SIGNAL IMPROVES AS A MARKET DIES. compute_crowding_ratio is
+competing-size-based, so an empty book reports crowding 0.0 against 50.0
+for a busy one (measured). Live, the settled incumbent scored 14.79
+against the best replacement's 120.63, so is_worthwhile_crowding_switch
+correctly refused -- nothing looks less crowded than a dead market. Risk
+also falls (no price movement) and reward density rises. check_trigger
+therefore never fires, and when something else does fire, the crowding
+gate blocks the switch. Liveness cannot be derived from any of these; it
+has to be its own check.
+
+FIX.
+- config.DEAD_MARKET_EMPTY_BOOK_SECONDS = 120.0. Long enough that a
+  transient empty book during real trading (refills in seconds) cannot
+  evict a healthy market, short enough to lose minutes not hours.
+- MarketRuntimeState.empty_book_since + is_dead(now). scoring_loop sets
+  it when BOTH sides are empty, clears it the moment any level returns.
+- scoring_loop no longer logs a snapshot when both sides are empty, which
+  removes the ~229k/day of empty rows.
+- market_switch_loop checks is_dead() BEFORE check_trigger, raises a
+  "dead" trigger, and "dead" skips the crowding gate alongside "volatile"
+  -- there is no point requiring a replacement be less crowded than a
+  market we must leave regardless.
+- Two tests. One pins the duration requirement (a single empty tick must
+  not evict). The other pins the trap itself: it asserts a dead book
+  reads as LESS crowded than a busy one, so if someone later tries to
+  infer liveness from crowding, that test documents why it cannot work.
+CONFIRMED: restarted, all four tables writing within 1s, watch list
+re-selected to live OCT05 markets.
+
+OPERATIONAL NOTE: the restart was done twice -- once immediately to stop
+losing data, once after deploying the fix. Collection resumed instantly
+both times.
+
+MONITORING WORKED. The healthcheck added on 10-03 caught this on its own:
+exit=1 with "[collector-stuck] no new DB row in 15546s", throttled to
+hourly re-alerts. This is the first incident in this project that was
+detected rather than stumbled upon.
+
+MEASUREMENT CORRECTIONS from the same session, both mine:
+- I reported 84109 "phantom" orderbook levels as a regression of the
+  10-03 fix. That was a measurement error: my detector counted
+  `0 < size < 0.5`, which flags LEGITIMATE small fractional sizes. Against
+  the actual threshold, true residue (0 < size <= 1e-6) is 0 out of
+  1611710 levels since the fix. The fix is holding exactly as intended.
+- I reported "database is locked" errors as an ongoing fault. There were
+  3 in 12 hours: one at 09:00:06 from backup_db.py, and TWO THAT I CAUSED
+  with my own diagnostic queries. In journal_mode=delete a long reader
+  blocks the writer, and logger.py connects with Python's default 5s
+  busy_timeout, so a heavy analytical scan of this 1.3GB DB can stall the
+  collector. Worth knowing before running big queries against it live.
+
+STILL OPEN, flagged not fixed: there is NO SETTLEMENT ACCOUNTING. When we
+switch out of a settled market, flatten_position returns None (the book
+has no side to cross), so the position's P&L stays frozen at its last
+mark. A settled binary market actually resolves to 0 or 100, so the true
+realised P&L is knowable and is not what gets recorded. Today that left
+145 contracts of KXTRUMPAPPROVE-26OCT04-E38.1 marked at -$11.88 unrealised
+rather than resolved. This biases P&L by an unknown amount every time a
+market settles under us, which is daily for these contracts.
+
+CLEAN-RUN P&L as of this entry: balance $989.53, i.e. -$10.47 -- realised
+$0.19, unrealised -$10.67, driven by a 145-contract long that moved
+against us. A small loss from adverse selection is a far more credible
+result than the +16% the phantom levels were manufacturing, and it is the
+first genuine signal this project has produced.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

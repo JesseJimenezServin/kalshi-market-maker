@@ -360,6 +360,30 @@ PERFORMANCE_HISTORY_LOOKBACK_HOURS = 336  # 14 days
 PERFORMANCE_HISTORY_BUCKET_SECONDS = 300  # 5 minutes
 
 # --------------------------------------------------------------------------
+# Dead-market detection
+# --------------------------------------------------------------------------
+# How long BOTH sides of a market's book must stay empty before we treat it
+# as dead (settled/closed) and force a switch out of it.
+#
+# Why this exists (2026-10-04): the three watched markets settled at
+# 16:59 UTC. A settled market has no resting size, and
+# compute_crowding_ratio reads "almost no competing size" as "wonderfully
+# uncrowded" -- the incumbent scored crowding=14.79 against the best
+# replacement's 120.63, so is_worthwhile_crowding_switch refused to move
+# and the bot sat on three finalized markets. It produced no scores,
+# quotes or inventory marks for 4.4 hours while still looking healthy to
+# systemctl, and wrote ~229,000 empty orderbook rows per day.
+#
+# Crowding, risk and reward all degrade GRACEFULLY toward "attractive" as
+# a book empties, so none of them can detect this. Liveness has to be its
+# own check.
+#
+# 120s is comfortably longer than any transient empty book during normal
+# trading (a real market refills within seconds) and short enough to lose
+# only minutes rather than hours.
+DEAD_MARKET_EMPTY_BOOK_SECONDS = 120.0
+
+# --------------------------------------------------------------------------
 # Contaminated markets (excluded from dashboard P&L / reward reporting)
 # --------------------------------------------------------------------------
 # These markets were watched while the orderbook.py float-residue bug was

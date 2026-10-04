@@ -981,6 +981,56 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_dead_market_detection_requires_sustained_empty_book():
+    """
+    A settled market's book goes empty and stays empty. A live one refills
+    within seconds, so deadness must require DURATION, not a single empty
+    tick -- otherwise a momentary gap would evict a healthy market.
+    """
+    st = MarketRuntimeState("TEST", target_size=100.0, discount_factor=0.9)
+    now = time.time()
+
+    # never seen empty
+    assert st.empty_book_since is None
+    assert st.is_dead(now) is False
+
+    # just went empty -> not dead yet
+    st.empty_book_since = now
+    assert st.is_dead(now) is False
+    assert st.is_dead(now + config.DEAD_MARKET_EMPTY_BOOK_SECONDS - 1) is False
+
+    # empty past the threshold -> dead
+    assert st.is_dead(now + config.DEAD_MARKET_EMPTY_BOOK_SECONDS) is True
+    assert st.is_dead(now + config.DEAD_MARKET_EMPTY_BOOK_SECONDS + 3600) is True
+
+    # liquidity returned -> no longer a candidate
+    st.empty_book_since = None
+    assert st.is_dead(now + 86400) is False
+    print("test_dead_market_detection_requires_sustained_empty_book: PASS")
+
+
+def test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate():
+    """
+    THE 2026-10-04 TRAP, pinned as a test. compute_crowding_ratio on an
+    EMPTY book reports LOWER (better) crowding than on a busy one, because
+    crowding is competing-size-based. So every quality signal improves as a
+    market dies, which is exactly why is_dead() cannot be derived from them.
+    """
+    busy = MarketBook(ticker="BUSY")
+    busy.apply_snapshot(sid=1, seq=1, yes=[(40, 5000.0)], no=[(59, 5000.0)])
+
+    dead = MarketBook(ticker="DEAD")
+    dead.apply_snapshot(sid=1, seq=1, yes=[], no=[])
+
+    busy_crowding = compute_crowding_ratio(busy, target_size=100.0)
+    dead_crowding = compute_crowding_ratio(dead, target_size=100.0)
+
+    assert dead_crowding <= busy_crowding, (dead_crowding, busy_crowding)
+    # and the dead book cannot even produce a mid
+    assert dead.best_yes_bid() is None and dead.best_no_bid() is None
+    print("test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate: PASS")
+
+
 def test_risk_engine_exposes_sub_level_breakdown():
     engine = RiskEngine(ticker="TEST")
     inventory = InventoryState(ticker="TEST", net_yes_contracts=420)  # 420/500 = 0.84 -> HIGH
@@ -1266,6 +1316,8 @@ if __name__ == "__main__":
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term()
+    test_dead_market_detection_requires_sustained_empty_book()
+    test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()
     test_is_recent_uses_cutoff()

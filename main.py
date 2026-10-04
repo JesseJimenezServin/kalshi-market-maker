@@ -80,6 +80,18 @@ class MarketRuntimeState:
         self.max_inventory = max_inventory if max_inventory is not None else config.MAX_SIMULATED_INVENTORY
         self.inventory = InventoryState(ticker=ticker)
         self.risk_engine = RiskEngine(ticker=ticker)
+        # Set by scoring_loop to the time BOTH sides of the book first went
+        # empty, cleared as soon as any level returns. market_switch_loop
+        # reads it to detect a settled market -- see
+        # config.DEAD_MARKET_EMPTY_BOOK_SECONDS.
+        self.empty_book_since: float | None = None
+
+    def is_dead(self, now: float) -> bool:
+        """Both sides of the book empty for longer than the threshold."""
+        return (
+            self.empty_book_since is not None
+            and (now - self.empty_book_since) >= config.DEAD_MARKET_EMPTY_BOOK_SECONDS
+        )
         self.quote: HypotheticalQuote | None = None  # set once we have book data
         # Cached by event_calendar.event_refresh_loop; static once fetched,
         # so scoring_loop can compute minutes_until_close fresh every tick
@@ -180,18 +192,38 @@ async def scoring_loop(
                 if book is None or book.stale:
                     continue
 
-                sim_logger.log_orderbook_snapshot(
-                    ticker=ticker,
-                    yes_levels=book.yes_side_sorted_desc(),
-                    no_levels=book.no_side_sorted_desc(),
-                )
-
                 # Mid price is needed both by the risk engine (before the quote
                 # is computed) and by the inventory mark-to-market below, so
                 # compute it once, up front, and reuse it. If either side of the
                 # book is empty we can't compute a mid at all this tick.
                 best_yes = book.best_yes_bid()
                 best_no = book.best_no_bid()
+
+                if best_yes is None and best_no is None:
+                    # BOTH sides empty. A live market refills within seconds;
+                    # a settled one never does. Record when this started so
+                    # market_switch_loop can force an exit, and do NOT log the
+                    # snapshot -- on 2026-10-04 three settled markets wrote
+                    # 41856 empty rows in 4.4h (90% of all writes, ~229k/day)
+                    # purely because this was logged before the emptiness
+                    # check.
+                    if state.empty_book_since is None:
+                        state.empty_book_since = time.time()
+                        logger.warning(
+                            "%s: both sides of the book are empty -- market may have settled; "
+                            "will force a switch after %.0fs",
+                            ticker, config.DEAD_MARKET_EMPTY_BOOK_SECONDS,
+                        )
+                    continue
+
+                state.empty_book_since = None
+
+                sim_logger.log_orderbook_snapshot(
+                    ticker=ticker,
+                    yes_levels=book.yes_side_sorted_desc(),
+                    no_levels=book.no_side_sorted_desc(),
+                )
+
                 if best_yes is None or best_no is None:
                     continue
                 mid = (best_yes[0] + (100 - best_no[0])) / 2.0
@@ -391,10 +423,25 @@ async def market_switch_loop(
                 if book is None or book.stale:
                     continue
 
+                # Liveness first. A settled market's book is empty, and every
+                # other signal reads that as GOOD: crowding falls (no
+                # competing size), risk falls (no price movement), reward
+                # density rises. check_trigger therefore never fires, and if
+                # something else does fire, the crowding gate below refuses
+                # the switch because nothing looks less crowded than a dead
+                # market. See config.DEAD_MARKET_EMPTY_BOOK_SECONDS for the
+                # 2026-10-04 incident this prevents.
                 crowding = compute_crowding_ratio(book, state.target_size)
-                trigger = switcher.check_trigger(ticker, state.risk_engine.risk_level, crowding)
-                if trigger is None:
-                    continue
+                if state.is_dead(time.time()):
+                    trigger = "dead"
+                    logger.warning(
+                        "%s: book empty for %.0fs -- treating as settled/dead and forcing a switch",
+                        ticker, time.time() - state.empty_book_since,
+                    )
+                else:
+                    trigger = switcher.check_trigger(ticker, state.risk_engine.risk_level, crowding)
+                    if trigger is None:
+                        continue
 
                 logger.warning(
                     "%s: sustained '%s' trigger fired (risk=%s, crowding=%s) -- searching for a replacement market",
@@ -429,6 +476,9 @@ async def market_switch_loop(
                 # "volatile" (HIGH risk) triggers skip this gate --
                 # escaping our own risk exposure doesn't require the
                 # replacement to specifically be less crowded.
+                # "dead" and "volatile" both skip this gate: there is no
+                # point requiring a replacement be less crowded than a market
+                # we must leave regardless.
                 if trigger == "crowded" and not is_worthwhile_crowding_switch(
                     crowding, replacement.crowding_ratio, config.CROWDING_RELATIVE_IMPROVEMENT_FACTOR
                 ):
