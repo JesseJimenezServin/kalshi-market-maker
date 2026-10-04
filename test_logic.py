@@ -981,6 +981,64 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_settlement_books_long_yes_at_resolution_not_last_mid():
+    """A long YES resolves at 100 if YES wins, 0 if it loses."""
+    inv = InventoryState(ticker="TEST")
+    inv.apply_yes_fill(price=40, size=100, max_inventory=1000)
+    assert inv.net_yes_contracts == 100 and inv.avg_entry_price == 40.0
+
+    delta = inv.settle(result_yes=True)
+    assert delta == 100 * (100 - 40), delta           # +6000c = +$60
+    assert inv.realized_pnl_cents == 6000.0
+    assert inv.net_yes_contracts == 0
+    assert inv.mark_to_market_pnl_cents(50.0) == 0.0  # nothing left to mark
+
+    losing = InventoryState(ticker="TEST2")
+    losing.apply_yes_fill(price=40, size=100, max_inventory=1000)
+    assert losing.settle(result_yes=False) == 100 * (0 - 40)   # -4000c = -$40
+    print("test_settlement_books_long_yes_at_resolution_not_last_mid: PASS")
+
+
+def test_settlement_books_short_yes_and_is_idempotent():
+    """A short-yes (long NO) position resolves the other way round."""
+    inv = InventoryState(ticker="TEST")
+    inv.apply_no_fill(no_price=70, size=50, max_inventory=1000)  # equiv short yes @ 30
+    assert inv.net_yes_contracts == -50 and inv.avg_entry_price == 30.0
+
+    # YES loses -> our short wins: (-net) * (entry - 0)
+    delta = inv.settle(result_yes=False)
+    assert delta == 50 * (30 - 0), delta
+    assert inv.net_yes_contracts == 0
+
+    # settling again must change nothing
+    before = inv.realized_pnl_cents
+    assert inv.settle(result_yes=False) == 0.0
+    assert inv.realized_pnl_cents == before
+    print("test_settlement_books_short_yes_and_is_idempotent: PASS")
+
+
+def test_settlement_replaces_the_frozen_unrealized_mark():
+    """
+    The 2026-10-04 case. 145 contracts long at ~1.8c were left marked at
+    -$11.88 UNREALIZED when the market settled, because leaving a dead
+    market froze the last mid instead of resolving. Settlement must convert
+    that into a realized fact in one direction or the other, and leave
+    nothing unrealized either way.
+    """
+    for result_yes in (True, False):
+        inv = InventoryState(ticker="KXTRUMPAPPROVE-26OCT04-E38.1")
+        inv.apply_yes_fill(price=2, size=145, max_inventory=1000)
+        stale_mid = 1.0
+        assert inv.mark_to_market_pnl_cents(stale_mid) != 0.0   # was being frozen
+
+        inv.settle(result_yes=result_yes)
+        assert inv.net_yes_contracts == 0
+        assert inv.mark_to_market_pnl_cents(stale_mid) == 0.0   # nothing frozen now
+        expected = 145 * ((100 if result_yes else 0) - 2)
+        assert inv.realized_pnl_cents == expected, (result_yes, inv.realized_pnl_cents)
+    print("test_settlement_replaces_the_frozen_unrealized_mark: PASS")
+
+
 def test_dead_market_detection_requires_sustained_empty_book():
     """
     A settled market's book goes empty and stays empty. A live one refills
@@ -1316,6 +1374,9 @@ if __name__ == "__main__":
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term()
+    test_settlement_books_long_yes_at_resolution_not_last_mid()
+    test_settlement_books_short_yes_and_is_idempotent()
+    test_settlement_replaces_the_frozen_unrealized_mark()
     test_dead_market_detection_requires_sustained_empty_book()
     test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate()
     test_risk_engine_exposes_sub_level_breakdown()

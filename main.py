@@ -388,6 +388,52 @@ async def incentive_refresh_loop(
         await asyncio.sleep(interval_sec)
 
 
+def _settle_if_resolved(rest_client, ticker: str, state, sim_logger) -> float | None:
+    """
+    If `ticker` has actually resolved, book the position at 100/0 instead of
+    leaving it frozen at its last mid. Returns cents booked, or None if the
+    market has not resolved yet (closed-but-unresolved, or the lookup
+    failed).
+
+    Blocking `requests` call -- callers must run this off the event loop.
+    """
+    try:
+        market = rest_client.get_market(ticker).get("market", {})
+    except Exception:
+        logger.exception("%s: could not fetch market to settle -- leaving position as-is", ticker)
+        return None
+
+    status = market.get("status")
+    result = (market.get("result") or "").lower()
+    if result not in ("yes", "no"):
+        # Closed but not yet resolved. Do NOT guess -- a wrong settlement is
+        # worse than a late one, and the position stays recorded as-is.
+        logger.warning(
+            "%s: book is dead (status=%s) but no settlement result yet -- "
+            "not settling; position stays marked at its last mid",
+            ticker, status,
+        )
+        return None
+
+    delta = state.inventory.settle(result_yes=(result == "yes"))
+    final_price = 100.0 if result == "yes" else 0.0
+    # Final mark so the dashboard's frozen-last-value behaviour freezes the
+    # TRUE resolved number rather than a stale mid.
+    sim_logger.log_inventory_mark(
+        ticker=ticker,
+        net_yes_contracts=state.inventory.net_yes_contracts,
+        avg_entry_price=state.inventory.avg_entry_price,
+        mid_price=final_price,
+        unrealized_pnl_cents=0.0,
+        realized_pnl_cents=state.inventory.realized_pnl_cents,
+        max_inventory=state.max_inventory,
+    )
+    logger.warning(
+        "%s: SETTLED %s -- booked %+.2f cents realized, position flat", ticker, result.upper(), delta
+    )
+    return delta
+
+
 async def market_switch_loop(
     rest_client: KalshiRestClient,
     ws_client: KalshiWebSocketClient,
@@ -490,6 +536,17 @@ async def market_switch_loop(
                         config.CROWDING_RELATIVE_IMPROVEMENT_FACTOR * 100,
                     )
                     continue
+
+                if trigger == "dead":
+                    # Settle BEFORE flattening. flatten_position needs a side
+                    # of the book to cross and a dead market has none, so it
+                    # would return None and silently leave the position
+                    # frozen at its last mid -- which is the bias this fixes.
+                    # After settling, the position is flat and flatten below
+                    # is correctly a no-op.
+                    await asyncio.to_thread(
+                        _settle_if_resolved, rest_client, ticker, state, sim_logger
+                    )
 
                 fill = quoting_policy.flatten_position(
                     book, state.inventory, state.max_inventory, reason=f"market_switch_{trigger}",

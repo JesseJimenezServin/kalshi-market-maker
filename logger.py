@@ -180,6 +180,10 @@ CREATE INDEX IF NOT EXISTS idx_event_calendar_ticker_ts ON event_calendar_snapsh
 """
 
 
+# How long a write waits for a competing lock before raising. See _conn.
+DB_BUSY_TIMEOUT_SEC = 30.0
+
+
 class SimulationLogger:
     def __init__(self, db_path=None):
         self.db_path = str(db_path or config.DB_PATH)
@@ -187,8 +191,26 @@ class SimulationLogger:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(self.db_path)
+        # timeout: Python's default is 5s, which is not enough on this
+        # database. In the default rollback-journal mode a READER blocks a
+        # writer, and reads here are not short -- backup_db.py's online
+        # .backup() and the off-box push's VACUUM INTO both scan a >1GB
+        # file, and the dashboard's tick does several full-table reads. On
+        # 2026-10-04 the 09:00 backup produced a real
+        # "sqlite3.OperationalError: database is locked" that lost that
+        # scoring tick, and an ad-hoc analytical query against the live DB
+        # stalled the collector the same way.
+        conn = sqlite3.connect(self.db_path, timeout=DB_BUSY_TIMEOUT_SEC)
         try:
+            # WAL lets readers and the writer run concurrently instead of
+            # excluding each other, which removes the whole class of
+            # conflict above rather than just waiting longer for it. It is
+            # a persistent property of the DB file, so this is a no-op
+            # after the first connection. synchronous=NORMAL is the
+            # standard WAL pairing: still crash-safe, without an fsync per
+            # commit on a once-per-second writer.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             yield conn
             conn.commit()
         finally:

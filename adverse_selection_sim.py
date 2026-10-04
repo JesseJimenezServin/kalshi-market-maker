@@ -108,6 +108,47 @@ class InventoryState:
         """Unrealized P&L if we marked net_yes_contracts to current mid."""
         return self.net_yes_contracts * (current_mid_yes_price - self.avg_entry_price)
 
+    def settle(self, result_yes: bool) -> float:
+        """
+        Resolve the position at settlement and book the result as REALIZED
+        P&L. Returns the cents booked (signed). Idempotent: a flat position
+        returns 0.0 and changes nothing.
+
+        A binary market does not expire at its last mid -- it resolves to
+        100 or 0, so the final P&L is a known fact, not an estimate. Before
+        this existed, leaving a settled market just froze the position at
+        whatever the last observed mid happened to be: on 2026-10-04 that
+        left 145 contracts of KXTRUMPAPPROVE-26OCT04-E38.1 recorded at
+        -$11.88 UNREALIZED forever, when the true outcome was determined.
+        These contracts settle daily, so the bias applied every day.
+
+        Uses the same sign convention as apply_yes_fill/apply_no_fill:
+        closing a long yes at price P books net * (P - entry); closing a
+        short yes books (-net) * (entry - P). Settlement is just that with
+        P pinned to 100 (yes) or 0 (no).
+        """
+        net = self.net_yes_contracts
+        if net == 0:
+            return 0.0
+
+        final_yes_price = 100.0 if result_yes else 0.0
+        if net > 0:
+            delta = net * (final_yes_price - self.avg_entry_price)
+        else:
+            delta = (-net) * (self.avg_entry_price - final_yes_price)
+
+        self.realized_pnl_cents += delta
+        self.net_yes_contracts = 0
+        self.avg_entry_price = 0.0
+        self.fill_events.append(
+            {"side": "settlement", "price": final_yes_price, "size": abs(net), "ts": time.time()}
+        )
+        logger.info(
+            "%s: settled %d contracts at %s -> realized %+.2f cents (total realized %+.2f)",
+            self.ticker, abs(net), "YES" if result_yes else "NO", delta, self.realized_pnl_cents,
+        )
+        return delta
+
 
 def process_trade_for_inventory(
     inventory: InventoryState,

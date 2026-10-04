@@ -1373,6 +1373,76 @@ against us. A small loss from adverse selection is a far more credible
 result than the +16% the phantom levels were manufacturing, and it is the
 first genuine signal this project has produced.
 
+## 2026-10-04 (later): settlement accounting, WAL, turnover validated
+
+Closing out the three items left open by the dead-market fix.
+
+### 1. SETTLEMENT ACCOUNTING -- was biasing P&L every single day
+A binary market does not expire at its last mid, it resolves to 100 or 0.
+There was no settlement path at all, so leaving a settled market froze
+the position at whatever mid was last observed: on 10-04 that recorded
+145 contracts of KXTRUMPAPPROVE-26OCT04-E38.1 as -$11.88 UNREALIZED when
+the true outcome was already determined. These contracts settle daily, so
+the bias applied daily, always leaving P&L as an estimate where a fact
+was available.
+
+InventoryState.settle(result_yes) books the position at 100/0 as REALIZED,
+flattens it, and is idempotent. It uses the existing sign convention:
+closing a long yes books net * (P - entry), a short yes (-net) *
+(entry - P); settlement is that with P pinned to 100 or 0.
+main.py calls _settle_if_resolved() on the "dead" trigger BEFORE
+flatten_position -- flatten needs a side of the book to cross and a dead
+market has none, so it would return None and silently leave the position
+frozen, which is the exact bias being fixed. It also writes a final
+inventory_marks row at the resolved price, so the dashboard's
+freeze-last-value behaviour freezes the TRUE number.
+It deliberately does NOT guess: if the market is closed but `result` is
+not yet "yes"/"no", it logs and leaves the position alone. A wrong
+settlement is worse than a late one.
+Three tests: long-yes resolving both ways, short-yes plus idempotency,
+and one reproducing the 10-04 position to assert nothing is left
+unrealized in either direction.
+
+### 2. DB LOCK CONTENTION -- journal_mode is now WAL
+The 09:00 backup produced a real "database is locked" that lost a scoring
+tick, and an ad-hoc analytical query stalled the collector the same way.
+Cause was structural, not bad luck: in rollback-journal mode a READER
+blocks the writer, and every reader here is slow -- backup_db.py's online
+.backup(), the off-box VACUUM INTO, and the dashboard tick all scan a
+>1.3GB file, while logger.py connected with Python's default 5s timeout.
+logger.py now sets journal_mode=WAL (readers and the writer no longer
+exclude each other) with synchronous=NORMAL, and a 30s busy_timeout as a
+backstop. WAL removes the conflict class rather than waiting longer for
+it.
+VERIFIED BEFORE DEPLOYING, because mode=ro readers under WAL can fail if
+they cannot create the shared-memory file: a mode=ro read works with the
+writer connected, a held read transaction does NOT block the writer, and
+a mode=ro read still works after a clean close with -wal/-shm absent.
+Then verified all four real consumers on the box: dashboard ($989.52,
+3 markets, 1090 points), backup_db.py (1.3GB -> 125MB, rotation working),
+the off-box push (1.3GB -> 108MB uploaded, exit 0, marker written), and
+healthcheck.sh (exit 0).
+
+### 3. TURNOVER -- validated, no problem found
+The open question was whether the fill model is too generous, since the
+biggest contaminated market turned over 71x its position cap. Checked
+against real traded volume using volume_fp:
+    KXTRUMPAPPROVE-26OCT05-E38.2   real volume 3838   our fills 104 = 2.7%
+    (my_share_yes on that market averages 0.022, i.e. 2.2%)
+Our simulated fills land at approximately our share of the resting size,
+which is what the model intends. High turnover was never the problem --
+it is a small position round-tripping many times while taking only ~3% of
+the flow. The 71x figure was misleading on its own.
+
+### Correction to my own claim in this session
+I reported a "fourth bug" -- that the code reads a non-existent `volume`
+field. That was wrong, and it was MY diagnostic script using
+m.get("volume"). The production code is correct: the Kalshi API exposes
+volume_fp / volume_24h_fp / open_interest_fp, and incentive_screener.py
+and market_switcher.py both go through fp_to_size()/dollars_to_cents()
+on the right names. A grep for the wrong names across the codebase
+returns nothing.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
