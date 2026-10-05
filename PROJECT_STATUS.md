@@ -1563,6 +1563,63 @@ formula pinned as a negative assertion so it cannot come back.
 CONFIRMED live: dashboard HTTP 200, collector writing, healthcheck exit 0,
 balance $1003.12.
 
+## 2026-10-05: risk-adjusted reward optimisation (two changes, both corrections)
+
+Asked to optimise for max risk-adjusted profit. What that turned out to
+mean in practice was fixing two places where the system was destroying
+revenue, not adding new optimisation. Both are measured, not speculative.
+
+### 1. reward_density inflated as a program approached expiry
+_reward_density computed reward_per_day as period_reward / days_remaining
+-- the WHOLE pool divided by the time LEFT -- so a market's apparent
+attractiveness grew as it neared expiry while the pool stayed fixed. This
+is the SAME bug fixed in server.py's daily_pool on 10-05, in the place
+that actually drives market SELECTION, and it was missed the first time.
+Measured live: KXBIGSKYOPEN (7-day, $40,000 program, 0.97 days left)
+scored 41.13 against a true 5.71 -- a 7.2x overstatement. The distortion
+is worst exactly where it does the most damage: a nearly-expired market
+has little pool left to win AND is about to go dead and force a switch.
+This is how the selector came to pick NFL game markets after the 06:45
+restart.
+program_reward_per_day() now derives the rate from the program's own
+start/end dates and is the SINGLE source of truth -- server.py imports it
+rather than keeping its own copy, so the dashboard and the selector cannot
+disagree about what a program pays.
+
+### 2. nothing guarded revenue when switching
+The "crowded" trigger asked only "is the replacement less contested?".
+Nothing asked "does it still pay?", so an uncontested but nearly worthless
+market always won. Measured cost on 10-05: the bot sat in NFL ladder
+markets worth an estimated $13.11/day/market while Trump approval markets
+worth $863.74/day/market were available -- a 66x gap -- for 30.3
+market-hours, foregoing an estimated $1,074. That single decision dwarfs
+the entire trading P&L the run has produced (+$3.12).
+is_reward_preserving_switch() + MIN_REPLACEMENT_REWARD_DENSITY_FRACTION
+(0.5) now require a replacement to pay at least half the incumbent's
+density. Mirrors CROWDING_RELATIVE_IMPROVEMENT_FACTOR: we will give up
+some revenue to escape genuine crowding, but not an order of magnitude.
+"dead" is exempt -- we have to leave regardless, and anything beats a
+settled book. Unknown density on either side is neutral (returns True), so
+a transient screener failure cannot freeze switching, consistent with how
+_adjusted_score already treats missing data.
+
+### What was deliberately NOT done
+No tuning of risk thresholds, inventory caps, skew ticks or quote sizing.
+Those knobs would be fitted against reward_dollars, which is an UPPER
+BOUND built on a share estimate that assumes no competitive response.
+Optimising hard against a number whose dominant error term is unmodelled
+would produce confident-looking overfitting, not profit. The existing risk
+layer was left intact: _adjusted_score already damps reward density by
+both crowding and volatility, the risk engine still pulls quotes at HIGH,
+and quote sides are still capped by remaining inventory room. Tuning those
+is a Phase 1 question, once real fills replace inferred ones.
+
+CONFIRMED after deploy: selector now ranks the $60,000/day approval markets
+top at a true density of 60.00; watch list re-selected to
+OCT06-E38.4/.5/.6; collector writing; healthcheck exit 0; no warnings.
+Four tests added, including the old density formula pinned as a negative
+assertion and the exact 66x case as a blocked switch.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

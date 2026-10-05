@@ -56,20 +56,56 @@ def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def _reward_density(period_reward: float, target_size: float, days_remaining: float) -> float:
+def program_reward_per_day(period_reward: float, start_date, end_date) -> float | None:
     """
-    Rough heuristic: reward per day, scaled down by how much capital
-    (Target Size) is required to even qualify. A market with a big pool
-    but a huge Target Size requirement is less attractive per-dollar than
-    a smaller pool with a modest Target Size.
+    Dollars of pool paid per day, derived from the program's OWN duration.
+    Returns None if the window is missing, unparseable or non-positive.
+
+    Single source of truth for this rate -- server.py imports it too, so
+    the dashboard and the market selector cannot disagree about what a
+    program pays.
+    """
+    if not period_reward or not start_date or not end_date:
+        return None
+    try:
+        t0 = datetime.fromisoformat(str(start_date))
+        t1 = datetime.fromisoformat(str(end_date))
+    except (TypeError, ValueError):
+        return None
+    days = (t1 - t0).total_seconds() / 86400.0
+    if days <= 0:
+        return None
+    return period_reward / days
+
+
+def _reward_density(period_reward: float, target_size: float, start_date, end_date) -> float:
+    """
+    Reward per day, scaled down by how much capital (Target Size) is
+    required to even qualify. A market with a big pool but a huge Target
+    Size requirement is less attractive per-dollar than a smaller pool
+    with a modest Target Size.
+
+    The per-day rate comes from the program's own start/end dates. It used
+    to be period_reward / days_remaining, which divided the WHOLE pool by
+    the time LEFT -- so a program's apparent density INFLATED as it
+    approached expiry, without the pool growing at all. Measured 2026-10-05:
+    a 7-day $40,000 program with 0.97 days left scored 41.13 against a true
+    5.71, a 7.2x overstatement. That is backwards twice over -- a
+    nearly-expired market has little pool left to win AND is about to go
+    dead, forcing a switch. It is how the selector came to park in NFL game
+    markets paying an estimated $13/day/market while Trump approval markets
+    paying $864/day/market sat available; 30.3 market-hours there cost an
+    estimated $1,074 in foregone reward.
 
     This does NOT account for how many other liquidity providers are
     already quoting there -- that's exactly what the reward_simulator's
     live-book pass is for. Treat this purely as a first-pass filter.
     """
-    if days_remaining <= 0 or target_size <= 0:
+    if target_size <= 0:
         return 0.0
-    reward_per_day = period_reward / days_remaining
+    reward_per_day = program_reward_per_day(period_reward, start_date, end_date)
+    if reward_per_day is None:
+        return 0.0
     return reward_per_day / target_size
 
 
@@ -194,7 +230,7 @@ def screen_incentive_programs(
             period_reward = float(p.get("period_reward", 0) or 0) / 100.0
             discount_factor_bps = int(p.get("discount_factor_bps", 0) or 0)
 
-            score = _reward_density(period_reward, target_size, days_remaining)
+            score = _reward_density(period_reward, target_size, start_date, end_date)
 
             screened.append(
                 ScreenedProgram(

@@ -52,7 +52,10 @@ from risk_engine import RiskEngine
 from news_feed import news_refresh_loop
 from event_calendar import event_refresh_loop, hours_until_close
 from singleton_lock import acquire_singleton_lock
-from market_switcher import MarketSwitcher, compute_crowding_ratio, find_replacement, is_worthwhile_crowding_switch
+from market_switcher import (
+    MarketSwitcher, compute_crowding_ratio, find_replacement,
+    is_worthwhile_crowding_switch, is_reward_preserving_switch,
+)
 
 logger = logging.getLogger("main")
 
@@ -66,10 +69,16 @@ class MarketRuntimeState:
         target_size: float,
         discount_factor: float,
         max_inventory: int | None = None,
+        reward_density_score: float | None = None,
     ):
         self.ticker = ticker
         self.target_size = target_size
         self.discount_factor = discount_factor
+        # First-pass reward-per-day-per-target-size for this market, carried
+        # so market_switch_loop can compare what a replacement pays against
+        # what we would be giving up. Without it the crowding gate could
+        # only reason about competition, never about revenue.
+        self.reward_density_score = reward_density_score
         # Per-market position cap. Defaults to the flat fallback constant;
         # run() overwrites this for every state right after construction
         # via capital_allocator.allocate_capital's profit/risk-weighted
@@ -126,6 +135,7 @@ def build_market_states(
             ticker,
             target_size=program.target_size,
             discount_factor=program.discount_factor_bps / 10000.0,
+            reward_density_score=program.reward_density_score,
         )
     return states
 
@@ -525,6 +535,27 @@ async def market_switch_loop(
                 # "dead" and "volatile" both skip this gate: there is no
                 # point requiring a replacement be less crowded than a market
                 # we must leave regardless.
+                # Revenue gate. Escaping crowding is not worth doing if the
+                # replacement barely pays -- see
+                # config.MIN_REPLACEMENT_REWARD_DENSITY_FRACTION for the
+                # 2026-10-05 case this prevents. "dead" is exempt: we have to
+                # leave regardless, so anything beats a settled book.
+                if trigger != "dead" and not is_reward_preserving_switch(
+                    state.reward_density_score,
+                    replacement.reward_density_score,
+                    config.MIN_REPLACEMENT_REWARD_DENSITY_FRACTION,
+                ):
+                    switcher.record_search_attempt()
+                    logger.info(
+                        "%s: best replacement %s pays reward density %.2f vs our %.2f "
+                        "(need >= %.0f%%) -- staying put rather than trading revenue for comfort",
+                        ticker, replacement.market_ticker,
+                        replacement.reward_density_score or 0.0,
+                        state.reward_density_score or 0.0,
+                        config.MIN_REPLACEMENT_REWARD_DENSITY_FRACTION * 100,
+                    )
+                    continue
+
                 if trigger == "crowded" and not is_worthwhile_crowding_switch(
                     crowding, replacement.crowding_ratio, config.CROWDING_RELATIVE_IMPROVEMENT_FACTOR
                 ):
@@ -575,6 +606,7 @@ async def market_switch_loop(
                     replacement.market_ticker,
                     target_size=replacement.target_size,
                     discount_factor=replacement.discount_factor_bps / 10000.0,
+                    reward_density_score=replacement.reward_density_score,
                     # Carry the vacated market's capital allocation forward
                     # unchanged rather than re-splitting across everyone else --
                     # a switch is scoped to the one market that triggered it,

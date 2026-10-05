@@ -294,6 +294,22 @@ CROWDING_RATIO_THRESHOLD = 3.0
 # exposure, not chasing lower crowding.
 CROWDING_RELATIVE_IMPROVEMENT_FACTOR = 0.5
 
+# A "crowded" switch must not cost us more revenue than the crowding is
+# worth. The replacement's reward density must be at least this fraction of
+# the market we are leaving, or we stay put.
+#
+# Why (measured 2026-10-05): the crowding trigger guarded crowding and
+# nothing guarded revenue, so the bot left Trump approval markets worth an
+# estimated $864/day/market for NFL game markets worth $13/day/market --
+# purely because they were less crowded. 30.3 market-hours there cost an
+# estimated $1,074 of foregone reward, which dwarfs the entire trading P&L
+# the run has produced.
+#
+# 0.5 mirrors CROWDING_RELATIVE_IMPROVEMENT_FACTOR: we accept giving up
+# some revenue to escape genuine crowding, but not an order of magnitude.
+# Crowding relief is only worth having if there is still a pool to win.
+MIN_REPLACEMENT_REWARD_DENSITY_FRACTION = 0.5
+
 # How long (seconds) a trigger condition (HIGH risk or crowded) must hold
 # CONTINUOUSLY before acting -- avoids switching on a single noisy tick.
 SWITCH_TRIGGER_SUSTAIN_SEC = 300  # 5 minutes

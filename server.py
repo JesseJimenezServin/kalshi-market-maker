@@ -50,6 +50,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 import config
+import incentive_screener
 from logger import SimulationLogger
 from singleton_lock import acquire_singleton_lock
 
@@ -84,19 +85,10 @@ def _program_reward_per_second(program) -> float | None:
     """
     if program is None:
         return None
-    total = program["period_reward"]
-    start, end = program["start_date"], program["end_date"]
-    if not total or not start or not end:
-        return None
-    try:
-        t0 = datetime.datetime.fromisoformat(str(start))
-        t1 = datetime.datetime.fromisoformat(str(end))
-    except (TypeError, ValueError):
-        return None
-    seconds = (t1 - t0).total_seconds()
-    if seconds <= 0:
-        return None
-    return total / seconds
+    per_day = incentive_screener.program_reward_per_day(
+        program["period_reward"], program["start_date"], program["end_date"]
+    )
+    return None if per_day is None else per_day / 86400.0
 
 
 def _exclusion_clause(column: str = "ticker") -> tuple[str, list[str]]:

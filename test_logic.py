@@ -23,7 +23,10 @@ from quoting_policy import (
     classify_fill_exit_reason,
 )
 from news_feed import score_relevance, is_relevant, derive_keywords, _parse_articles, _build_news_query
-from market_switcher import MarketSwitcher, compute_crowding_ratio, is_worthwhile_crowding_switch
+from market_switcher import (
+    MarketSwitcher, compute_crowding_ratio,
+    is_worthwhile_crowding_switch, is_reward_preserving_switch,
+)
 from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
 from main import _select_initial_watchlist, MarketRuntimeState
@@ -33,6 +36,7 @@ from server import (
     _program_reward_per_second,
 )
 import quoting_policy
+from incentive_screener import _reward_density
 import config
 
 
@@ -985,6 +989,64 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_reward_density_does_not_inflate_as_a_program_nears_expiry():
+    """
+    The 2026-10-05 selection bug. Density was reward_per_day computed as
+    period_reward / days_remaining -- the WHOLE pool over the time LEFT --
+    so a market's apparent attractiveness grew as it approached expiry
+    without the pool growing at all. That is backwards twice: a nearly
+    expired market has little left to win AND is about to go dead.
+    """
+    start, end = "2026-10-01T00:00:00+00:00", "2026-10-08T00:00:00+00:00"  # 7-day program
+    pool, target = 40000.0, 1000.0
+
+    density = _reward_density(pool, target, start, end)
+    assert abs(density - (pool / 7.0) / target) < 1e-9, density
+
+    # identical regardless of how much time is left -- that is the point
+    assert _reward_density(pool, target, start, end) == density
+
+    # the old formula with 0.97 days left scored 7.2x higher
+    old_formula = (pool / 0.972) / target
+    assert old_formula > density * 7.0, (old_formula, density)
+
+    # a higher-paying program must rank above a lower-paying one of equal length
+    assert _reward_density(60000.0, target, start, end) > density
+
+    # degenerate inputs -> 0.0, never a crash or a divide-by-zero
+    assert _reward_density(pool, 0.0, start, end) == 0.0
+    assert _reward_density(pool, target, None, None) == 0.0
+    assert _reward_density(pool, target, start, start) == 0.0
+    print("test_reward_density_does_not_inflate_as_a_program_nears_expiry: PASS")
+
+
+def test_switch_is_blocked_when_replacement_pays_far_less():
+    """
+    The crowding gate asked "is the new market less contested?" and nothing
+    asked "does it still pay?", so the bot left $864/day/market approval
+    markets for $13/day/market NFL markets. 30.3 market-hours cost an
+    estimated $1,074 of foregone reward.
+    """
+    f = config.MIN_REPLACEMENT_REWARD_DENSITY_FRACTION
+
+    # the real case: replacement pays ~1.5% of the incumbent -> blocked
+    assert is_reward_preserving_switch(60.0, 0.9, f) is False
+    # a modest give-up to escape crowding is still allowed
+    assert is_reward_preserving_switch(60.0, 40.0, f) is True
+    # exactly at the boundary is allowed
+    assert is_reward_preserving_switch(60.0, 60.0 * f, f) is True
+    assert is_reward_preserving_switch(60.0, 60.0 * f - 0.01, f) is False
+    # a better-paying replacement is obviously fine
+    assert is_reward_preserving_switch(10.0, 99.0, f) is True
+
+    # unknown density must NOT freeze switching -- neutral, like _adjusted_score
+    assert is_reward_preserving_switch(None, 1.0, f) is True
+    assert is_reward_preserving_switch(1.0, None, f) is True
+    # nothing to protect if the incumbent pays nothing
+    assert is_reward_preserving_switch(0.0, 0.0, f) is True
+    print("test_switch_is_blocked_when_replacement_pays_far_less: PASS")
+
+
 def test_reward_rate_uses_program_duration_not_time_remaining():
     """
     The 2026-10-05 bug. daily_pool was period_reward / days_remaining, which
@@ -1447,6 +1509,8 @@ if __name__ == "__main__":
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term()
+    test_reward_density_does_not_inflate_as_a_program_nears_expiry()
+    test_switch_is_blocked_when_replacement_pays_far_less()
     test_reward_rate_uses_program_duration_not_time_remaining()
     test_quote_sides_are_sized_by_remaining_inventory_room()
     test_settlement_books_long_yes_at_resolution_not_last_mid()

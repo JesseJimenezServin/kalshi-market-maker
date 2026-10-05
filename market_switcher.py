@@ -76,6 +76,31 @@ def _crowding_ratio_from_raw_orderbook(raw: dict, target_size: float) -> float |
     return (yes_total + no_total) / (2.0 * target_size)
 
 
+def is_reward_preserving_switch(
+    current_density: float | None,
+    replacement_density: float | None,
+    min_fraction: float,
+) -> bool:
+    """
+    True if the replacement still pays enough to be worth moving to.
+
+    The crowding gate asks "is the new market less contested?". Nothing
+    asked "does the new market still pay?", so an uncontested but nearly
+    worthless market always won. This is the missing half.
+
+    Unknown density on either side returns True (neutral) rather than
+    blocking -- consistent with _adjusted_score treating missing data as
+    neutral, and so a transient screener failure cannot freeze switching
+    altogether. A current density of 0 also returns True: there is nothing
+    to protect.
+    """
+    if current_density is None or replacement_density is None:
+        return True
+    if current_density <= 0:
+        return True
+    return replacement_density >= current_density * min_fraction
+
+
 def is_worthwhile_crowding_switch(
     current_crowding: float | None,
     replacement_crowding: float | None,
