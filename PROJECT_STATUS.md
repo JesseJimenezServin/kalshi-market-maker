@@ -1443,6 +1443,62 @@ and market_switcher.py both go through fp_to_size()/dollars_to_cents()
 on the right names. A grep for the wrong names across the codebase
 returns nothing.
 
+## 2026-10-05: settlement backfill applied; WAL and empty-row fixes confirmed
+
+### Backfill
+The settlement path added on 10-04 only covers markets that go dead while
+being watched. Six positions had been abandoned BEFORE it existed and were
+still frozen at whatever mid was last observed, all six since finalized
+with known results:
+    KXTRUMPAPPROVE-26OCT01-E38.5   -45 @ 20.91  no   $  0.63 -> $  9.41
+    KXTRUMPAPPROVE-26OCT01-E38.6     6 @ 13.00  no   $  0.03 -> $ -0.78
+    KXTRUMPAPPROVE-26OCT01-E38.8     1 @ 19.00  yes  $ -0.07 -> $  0.81
+    KXTRUMPAPPROVE-26OCT04-E38.0    44 @  1.00  no   $  0.22 -> $ -0.44
+    KXTRUMPAPPROVE-26OCT04-E38.1   145 @  9.69  no   $-11.60 -> $-13.77
+    KXTRUMPAPPROVE-26SEP30-E38.7   -20 @ 22.00  no   $  0.40 -> $  4.40
+Reported P&L went -$10.48 -> -$0.46, i.e. the dashboard had been
+OVERSTATING the loss by $10.02 on $1000 of capital. Three short positions
+that resolved in our favour were marked at their last mid instead of at 0.
+
+backfill_settlements.py is committed rather than run as a throwaway, with
+two deliberate properties:
+  - It REUSES InventoryState.settle() instead of reimplementing the
+    arithmetic. A backfill that computed settlement even slightly
+    differently from the live path would leave a permanent inconsistency in
+    the same column -- worse than the bug it fixes.
+  - It only ADDS rows. server.py takes the latest mark per ticker, so a new
+    row supersedes the stale one while the old rows remain as the record of
+    what was believed at the time. Nothing is deleted.
+Idempotent, verified: the settled rows carry net_yes_contracts = 0, so a
+second run reports 37 already-flat and a $0.00 correction. It skips the six
+CONTAMINATED_TICKERS on purpose -- their entry prices came from phantom
+liquidity, so settling them would promote an artefact to a realised fact.
+Ran against the live DB with the collector writing; no lock errors, latest
+row 1s old, healthcheck exit 0 throughout.
+
+### WAL confirmed (24h of evidence)
+Every "database is locked" in the preceding 24h, and none after:
+    03:33:20, :25, :30, :36, :41   the OFF-BOX PUSH's VACUUM INTO
+    09:00:06                       the on-box backup
+    20:51-20:54 (x4)               my own diagnostic queries
+    since 21:37:40 (WAL deploy)    0, and 0 scoring-loop failures
+Worth recording that BOTH backup jobs were causing this daily, not just the
+09:00 one -- the 03:33 cluster from the off-box push had not been noticed
+before. WAL removed a recurring daily data-loss source, not a one-off.
+
+### Empty-row fix confirmed
+0 empty orderbook rows out of 25869 written since the fix, against 90%
+before. The ~229k/day of bloat is gone. The -wal file is holding at 0.1MB,
+so checkpointing is keeping up with a once-per-second writer.
+
+### Where the run actually stands
+Balance $999.54. Three days of clean-book market making has produced
+approximately nothing, which is the honest and expected result for passive
+quoting on these markets -- and is the first time this project's headline
+number has been trustworthy. Settlement's first live exercise is ~16:59 UTC
+on 10-05, when the current OCT05 markets resolve; the log should show a
+SETTLED line for each.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
