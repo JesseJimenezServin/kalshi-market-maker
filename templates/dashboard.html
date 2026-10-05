@@ -256,12 +256,20 @@
   </section>
 
   <section class="panel span-2">
-    <h2>Reward Score (proxy) vs Simulated P&amp;L ($)</h2>
+    <h2>Est. Reward Income vs Simulated P&amp;L ($)</h2>
     <canvas id="performance-chart" height="90"></canvas>
     <div class="muted" style="margin-top:6px; font-size:11px;">
-      Reward score is a unitless cumulative proxy (sum of per-snapshot combined score), not a dollar
-      figure -- Kalshi's real USD payout pools every participant's score over the period, which isn't
-      reconstructable from public data alone. P&amp;L is the simulated mark-to-market total in dollars.
+      <strong>Est. reward income ($)</strong> and <strong>simulated P&amp;L ($)</strong> share the
+      right-hand axis so the two halves of the strategy are directly comparable: reward income is the
+      revenue, P&amp;L is mostly the adverse-selection cost of earning it. The whole question this
+      project exists to answer is whether the green line outruns the red one.
+      <br>
+      <strong>Reward income is an UPPER BOUND, not a forecast.</strong> It is
+      (combined_score / 2) x the program's dollars-per-second x time spent quoting. Our share assumes
+      our order is added on top of the existing book with <em>nobody reacting</em> -- resting real size
+      in a $60k/day program would draw a competitive response that grows the denominator and shrinks
+      our share. It also assumes we are never paid less than our snapshot share implies.
+      The blue line is the raw unitless score it is derived from.
     </div>
   </section>
 </main>
@@ -557,6 +565,19 @@ function initChart() {
         pointRadius: 0,
         tension: 0.15,
       },
+      {
+        // Same axis as P&L on purpose -- revenue and cost belong in the
+        // same units. Dashed because it is an estimated upper bound, not a
+        // measured quantity like the other two.
+        label: "Est. Reward Income ($, upper bound)",
+        data: [],
+        borderColor: "#3fb950",
+        backgroundColor: "transparent",
+        borderDash: [5, 3],
+        yAxisID: "y1",
+        pointRadius: 0,
+        tension: 0.15,
+      },
     ]},
     options: {
       animation: false,
@@ -565,7 +586,7 @@ function initChart() {
       scales: {
         x: { type: "linear", ticks: { color: "#7d8894", maxTicksLimit: 10, callback: timeTickCallback }, grid: { color: "#1a2129" } },
         y: { position: "left", ticks: { color: "#58a6ff" }, grid: { color: "#1a2129" }, title: { display: true, text: "Reward score (proxy)", color: "#58a6ff" } },
-        y1: { position: "right", ticks: { color: "#f85149" }, grid: { display: false }, title: { display: true, text: "P&L ($)", color: "#f85149" } },
+        y1: { position: "right", ticks: { color: "#d7dde3" }, grid: { display: false }, title: { display: true, text: "Dollars (P&L and est. reward)", color: "#d7dde3" } },
       },
       plugins: { legend: { labels: { color: "#d7dde3" } } },
     },
@@ -576,8 +597,10 @@ function renderChart(history) {
   if (!chart) return;
   const rewardSeries = history.reward_score || [];
   const pnlSeries = history.pnl_dollars || [];
+  const rewardDollarSeries = history.reward_dollars || [];
   chart.data.datasets[0].data = rewardSeries.map(p => ({ x: p.ts, y: p.value }));
   chart.data.datasets[1].data = pnlSeries.map(p => ({ x: p.ts, y: p.value }));
+  chart.data.datasets[2].data = rewardDollarSeries.map(p => ({ x: p.ts, y: p.value }));
   chart.update();
 }
 

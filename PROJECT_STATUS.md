@@ -1499,6 +1499,70 @@ number has been trustworthy. Settlement's first live exercise is ~16:59 UTC
 on 10-05, when the current OCT05 markets resolve; the log should show a
 SETTLED line for each.
 
+## 2026-10-05: reward income finally measured in dollars
+
+Until now the dashboard measured COSTS in dollars (pnl_dollars) and
+REVENUE in a unitless score, which made the one question this project
+exists to answer -- does incentive income exceed adverse selection? --
+impossible to read off the chart. Three changes fix that.
+
+### 1. daily_pool was overstated by 74% and growing
+It was period_reward / days_remaining: the WHOLE pool divided by the time
+LEFT. A $60,000 24-hour program with 0.575 days remaining reported
+$104,408/day, and the error grows without bound as a program nears its
+end. The pool is fixed; only the time left shrinks.
+_program_reward_per_second() now derives the rate from the program's own
+start_date/end_date. Same case now reports $60,000/day. It returns None
+rather than raising on missing, malformed or zero-length windows.
+
+### 2. reward_dollars series added
+Kalshi pools 2.0 of snapshot score per snapshot across all participants,
+so our fraction of a pool is combined_score / 2.0. Multiplied by the
+program's dollars-per-second and the time actually spent quoting, that
+gives dollars, accumulated per bucket per ticker. It is plotted on the
+SAME right-hand axis as pnl_dollars, deliberately: revenue and cost
+belong in the same units, and the chart now shows directly whether the
+green line outruns the red.
+
+CURRENT READING: est. reward income $6,098 against simulated P&L $3.12
+over the run so far. Verified by independent recomputation at $7,106 --
+higher as expected, because that check uses max(ts)-min(ts) per ticker
+(which counts gaps) while the series sums actual buckets.
+
+THE NUMBER IS AN UPPER BOUND AND THE GAP IS THE WHOLE RESEARCH QUESTION.
+$6,098 on $1000 of capital in five days is not a forecast and should not
+be read as one. my_share models our order added on top of the existing
+book with NOBODY REACTING; resting real size in a $60k/day program would
+draw a competitive response that grows the normalisation denominator and
+shrinks our share. reward_simulator.py's docstring has always said this
+is the thing it cannot model. The distance between $6,098 and whatever
+Phase 1 actually pays IS the competitive-response effect, and measuring
+it is the point of the exercise. The caveat is stated in the dashboard UI
+itself, not just here, so the number cannot be read naively.
+
+### 3. quote sizing vs the inventory cap -- a three-way inconsistency
+apply_yes_fill/apply_no_fill clamp a fill at max_inventory and justify
+discarding the remainder as "rest assumed unfilled because we'd have
+pulled the quote". But compute_quote never pulled anything -- it returned
+the full DEFAULT_SIMULATED_QUOTE_SIZE regardless of inventory -- and
+reward_simulator scores whatever size is resting. So at the cap the
+simulation simultaneously assumed the quote was GONE (for fills) and
+STILL THERE (for reward score), collecting incentive credit for liquidity
+it had already decided it was not providing.
+compute_quote now sizes each side by the room actually left on it
+(yes_room = max_inventory - net, no_room = max_inventory + net), pulling
+a side at 0 and returning None when both are capped. Fills, scoring and
+quoting now agree, and the approach to the cap is gradual rather than a
+cliff, which is also what a real maker would do.
+
+Note this makes reward estimates slightly CONSERVATIVE relative to before
+-- correctly so, since we no longer score size we are not providing.
+
+Five tests added across the three changes, including the old daily_pool
+formula pinned as a negative assertion so it cannot come back.
+CONFIRMED live: dashboard HTTP 200, collector writing, healthcheck exit 0,
+balance $1003.12.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

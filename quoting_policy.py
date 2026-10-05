@@ -224,11 +224,35 @@ def compute_quote(
     yes_price = _clamp_price(yes_price)
     no_price = _clamp_price(no_price)
 
+    # Size each side by the inventory room ACTUALLY left on it, pulling the
+    # side entirely when there is none.
+    #
+    # This closes a three-way inconsistency. apply_yes_fill/apply_no_fill
+    # clamp a fill to max_inventory and justify discarding the rest as "we'd
+    # have pulled the quote" -- but nothing here ever pulled it, and
+    # reward_simulator scores whatever size is resting. So at the inventory
+    # cap the simulation simultaneously assumed the quote was gone (for
+    # fills) and still there (for reward score), collecting incentive credit
+    # for liquidity it had already decided it was not providing.
+    #
+    # Sizing by room also makes the approach to the cap gradual rather than
+    # a cliff, which is what a real maker would do.
+    yes_room = max(0, max_inventory - inventory.net_yes_contracts)
+    no_room = max(0, max_inventory + inventory.net_yes_contracts)
+    yes_size = min(base_size, yes_room)
+    no_size = min(base_size, no_room)
+
+    if yes_size <= 0 and no_size <= 0:
+        # Both sides capped: we are not quoting at all, so there is no quote
+        # to score or fill. Returning None keeps that explicit rather than
+        # emitting a zero-size quote the rest of the pipeline has to special-case.
+        return None
+
     return HypotheticalQuote(
         yes_price=yes_price,
-        yes_size=base_size,
+        yes_size=yes_size,
         no_price=no_price,
-        no_size=base_size,
+        no_size=no_size,
     )
 
 

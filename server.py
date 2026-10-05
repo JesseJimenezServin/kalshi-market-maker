@@ -37,6 +37,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import sqlite3
@@ -68,6 +69,34 @@ app = FastAPI(title="Kalshi Liquidity Lab Dashboard")
 SimulationLogger()
 
 RECENT_FILLS_LIMIT = 10
+
+
+def _program_reward_per_second(program) -> float | None:
+    """
+    Dollars of incentive pool paid per second, from the program's own
+    start/end dates.
+
+    NOT period_reward / days_remaining, which is what this used to be. That
+    divides the WHOLE pool by the time LEFT, so on 2026-10-05 a $60,000
+    24-hour program with 13.8h remaining reported a $104,408/day pool -- a
+    74% overstatement that grows without bound as a program nears its end.
+    The pool is fixed; only the time left shrinks.
+    """
+    if program is None:
+        return None
+    total = program["period_reward"]
+    start, end = program["start_date"], program["end_date"]
+    if not total or not start or not end:
+        return None
+    try:
+        t0 = datetime.datetime.fromisoformat(str(start))
+        t1 = datetime.datetime.fromisoformat(str(end))
+    except (TypeError, ValueError):
+        return None
+    seconds = (t1 - t0).total_seconds()
+    if seconds <= 0:
+        return None
+    return total / seconds
 
 
 def _exclusion_clause(column: str = "ticker") -> tuple[str, list[str]]:
@@ -294,7 +323,77 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
         pnl_series.append({"ts": bucket_end_ts, "value": pnl_dollars})
         balance_series.append({"ts": bucket_end_ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
 
-    return {"reward_score": reward_series, "pnl_dollars": pnl_series, "balance_dollars": balance_series}
+    # ------------------------------------------------------------------
+    # reward_dollars: an ESTIMATE of incentive income, so the two halves of
+    # the strategy are finally in the same units.
+    #
+    # Until now the dashboard measured costs in dollars (pnl_dollars) and
+    # revenue in a unitless score, which made the central question of this
+    # project -- does reward income exceed adverse selection? -- impossible
+    # to read off the chart.
+    #
+    # Kalshi pools 2.0 of snapshot score per snapshot across ALL
+    # participants, so our fraction of a program's pool is
+    # combined_score / 2.0. Multiplying by the program's dollars-per-second
+    # and the time actually spent quoting gives dollars.
+    #
+    # THIS IS AN UPPER BOUND, not a forecast. my_share models our order
+    # added on top of the existing book with nobody reacting; resting real
+    # size in a $60k/day program would draw a competitive response that
+    # grows the denominator and shrinks our share. reward_simulator.py's
+    # module docstring says the same thing. Treat it as "what we would earn
+    # if the rest of the book ignored us".
+    rate_by_ticker: dict[str, float] = {}
+    for prog in conn.execute(
+        """
+        SELECT ticker, period_reward, start_date, end_date FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY ts DESC) AS rn
+            FROM incentive_program_snapshots
+        ) WHERE rn = 1
+        """
+    ).fetchall():
+        rate = _program_reward_per_second(prog)
+        if rate is not None:
+            rate_by_ticker[prog["ticker"]] = rate
+
+    bucket_rows = conn.execute(
+        f"""
+        SELECT CAST(ts / ? AS INTEGER) AS b, ticker,
+               AVG(combined_score) AS mean_score, MAX(ts) AS ts
+        FROM snapshot_scores
+        WHERE ts > ?{excl_sql}
+        GROUP BY b, ticker
+        ORDER BY b ASC
+        """,
+        (bucket, cutoff_ts, *excl_params),
+    ).fetchall()
+
+    reward_dollars_series = []
+    cumulative_reward = 0.0
+    current_bucket = None
+    bucket_end_ts = None
+    bucket_accrual = 0.0
+    for r in bucket_rows:
+        if current_bucket is not None and r["b"] != current_bucket:
+            cumulative_reward += bucket_accrual
+            reward_dollars_series.append({"ts": bucket_end_ts, "value": cumulative_reward})
+            bucket_accrual = 0.0
+        current_bucket = r["b"]
+        bucket_end_ts = r["ts"]
+        rate = rate_by_ticker.get(r["ticker"])
+        if rate:
+            # share of pool  x  $/s  x  seconds in this bucket
+            bucket_accrual += ((r["mean_score"] or 0.0) / 2.0) * rate * bucket
+    if current_bucket is not None:
+        cumulative_reward += bucket_accrual
+        reward_dollars_series.append({"ts": bucket_end_ts, "value": cumulative_reward})
+
+    return {
+        "reward_score": reward_series,
+        "pnl_dollars": pnl_series,
+        "balance_dollars": balance_series,
+        "reward_dollars": reward_dollars_series,
+    }
 
 
 def _market_metadata(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
@@ -473,10 +572,12 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
                 total_reward = program["period_reward"]
                 program_start = program["start_date"]
                 program_end = program["end_date"]
-                if program["days_remaining"]:
-                    # Same "reward per day" heuristic incentive_screener.py
-                    # already uses -- not a literal daily-reset figure.
-                    daily_pool = program["period_reward"] / program["days_remaining"]
+                rate = _program_reward_per_second(program)
+                if rate is not None:
+                    # The pool spread over the program's OWN duration. See
+                    # _program_reward_per_second for why days_remaining is
+                    # the wrong denominator.
+                    daily_pool = rate * 86400.0
 
             unrealized_pnl = None
             realized_pnl = None

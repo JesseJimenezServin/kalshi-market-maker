@@ -28,7 +28,11 @@ from event_calendar import hours_until_close
 from incentive_screener import _adjusted_score, _estimate_crowding, _estimate_recent_volatility, select_watchlist
 from main import _select_initial_watchlist, MarketRuntimeState
 from capital_allocator import allocate_capital
-from server import _risk_reason, _is_recent, _capital_allocation, _performance_history
+from server import (
+    _risk_reason, _is_recent, _capital_allocation, _performance_history,
+    _program_reward_per_second,
+)
+import quoting_policy
 import config
 
 
@@ -981,6 +985,75 @@ def test_market_runtime_state_defaults_max_inventory_and_accepts_override():
     print("test_market_runtime_state_defaults_max_inventory_and_accepts_override: PASS")
 
 
+def test_reward_rate_uses_program_duration_not_time_remaining():
+    """
+    The 2026-10-05 bug. daily_pool was period_reward / days_remaining, which
+    divides the WHOLE pool by the time LEFT -- so it grew without bound as a
+    program neared its end. Real case: a $60,000 24-hour program with 0.575
+    days left reported $104,408/day, a 74% overstatement.
+    """
+    prog = {
+        "period_reward": 60000.0,
+        "start_date": "2026-10-04T14:16:40.819871+00:00",
+        "end_date": "2026-10-05T14:16:40.819871+00:00",
+        "days_remaining": 0.5747,
+    }
+    rate = _program_reward_per_second(prog)
+    assert rate is not None
+    assert abs(rate * 86400.0 - 60000.0) < 1.0, rate * 86400.0
+
+    # the old formula, for contrast -- must NOT be what we report
+    old = prog["period_reward"] / prog["days_remaining"]
+    assert old > 100000.0
+    assert abs(rate * 86400.0 - old) > 40000.0
+
+    # malformed / missing inputs degrade to None rather than raising
+    assert _program_reward_per_second(None) is None
+    assert _program_reward_per_second({"period_reward": 1, "start_date": None, "end_date": None}) is None
+    assert _program_reward_per_second(
+        {"period_reward": 1, "start_date": "nonsense", "end_date": "also nonsense"}
+    ) is None
+    # zero-length program must not divide by zero
+    assert _program_reward_per_second(
+        {"period_reward": 1, "start_date": "2026-10-04T00:00:00+00:00",
+         "end_date": "2026-10-04T00:00:00+00:00"}
+    ) is None
+    print("test_reward_rate_uses_program_duration_not_time_remaining: PASS")
+
+
+def test_quote_sides_are_sized_by_remaining_inventory_room():
+    """
+    Closes a three-way inconsistency: apply_yes_fill clamped fills at
+    max_inventory justifying it as "we'd have pulled the quote", but
+    compute_quote never pulled and reward_simulator kept scoring the full
+    resting size -- so at the cap we collected incentive credit for
+    liquidity we had already assumed was withdrawn.
+    """
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[(40, 5000.0)], no=[(59, 5000.0)])
+
+    flat = InventoryState(ticker="TEST")
+    q = quoting_policy.compute_quote(book, LOW, flat, 100, 300, 1000.0, minutes_until_close=600)
+    assert q.yes_size == 100 and q.no_size == 100, (q.yes_size, q.no_size)
+
+    # long yes at the cap -> no room to buy more yes, that side is pulled
+    maxed_long = InventoryState(ticker="TEST", net_yes_contracts=300, avg_entry_price=40.0)
+    q = quoting_policy.compute_quote(book, LOW, maxed_long, 100, 300, 1000.0, minutes_until_close=600)
+    assert q.yes_size == 0, q.yes_size
+    assert q.no_size == 100, q.no_size      # still room to sell yes
+
+    # partially full -> sized to the room that is actually left
+    partial = InventoryState(ticker="TEST", net_yes_contracts=250, avg_entry_price=40.0)
+    q = quoting_policy.compute_quote(book, LOW, partial, 100, 300, 1000.0, minutes_until_close=600)
+    assert q.yes_size == 50, q.yes_size
+
+    # short yes at the cap -> the NO side is the one with no room
+    maxed_short = InventoryState(ticker="TEST", net_yes_contracts=-300, avg_entry_price=40.0)
+    q = quoting_policy.compute_quote(book, LOW, maxed_short, 100, 300, 1000.0, minutes_until_close=600)
+    assert q.no_size == 0 and q.yes_size == 100, (q.yes_size, q.no_size)
+    print("test_quote_sides_are_sized_by_remaining_inventory_room: PASS")
+
+
 def test_settlement_books_long_yes_at_resolution_not_last_mid():
     """A long YES resolves at 100 if YES wins, 0 if it loses."""
     inv = InventoryState(ticker="TEST")
@@ -1374,6 +1447,8 @@ if __name__ == "__main__":
     test_derive_keywords_ranks_capitalized_proper_nouns_first()
     test_is_relevant_requires_distinctive_keyword_not_just_ratio()
     test_is_relevant_requires_second_keyword_for_ubiquitous_distinctive_term()
+    test_reward_rate_uses_program_duration_not_time_remaining()
+    test_quote_sides_are_sized_by_remaining_inventory_room()
     test_settlement_books_long_yes_at_resolution_not_last_mid()
     test_settlement_books_short_yes_and_is_idempotent()
     test_settlement_replaces_the_frozen_unrealized_mark()
