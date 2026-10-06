@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS quote_snapshots (
     -- Real resting depth vs target_size (see
     -- market_switcher.compute_crowding_ratio) -- Kalshi doesn't publish
     -- a "competition level" directly, this is our own proxy for it.
-    crowding_ratio REAL
+    crowding_ratio REAL,
+    displacement_cents REAL
 );
 
 CREATE TABLE IF NOT EXISTS market_switches (
@@ -251,6 +252,11 @@ class SimulationLogger:
         for col, coltype in (
             ("volatility_level", "TEXT"), ("inventory_level", "TEXT"),
             ("news_signal", "INTEGER"), ("event_signal", "INTEGER"), ("crowding_ratio", "REAL"),
+            # Added 2026-10-06. The incident that day was hard to diagnose
+            # because a single "volatility: LOW" badge hid WHICH term was
+            # being measured; logging the raw displacement makes the next one
+            # readable straight from the data.
+            ("displacement_cents", "REAL"),
         ):
             if col not in quote_cols:
                 conn.execute(f"ALTER TABLE quote_snapshots ADD COLUMN {col} {coltype}")
@@ -411,6 +417,7 @@ class SimulationLogger:
         news_signal: bool | None = None,
         event_signal: bool | None = None,
         crowding_ratio: float | None = None,
+        displacement_cents: float | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
@@ -418,14 +425,14 @@ class SimulationLogger:
                 """INSERT INTO quote_snapshots
                    (ts, ticker, risk_level, quote_yes_price, quote_yes_size,
                     quote_no_price, quote_no_size, volatility_level, inventory_level,
-                    news_signal, event_signal, crowding_ratio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    news_signal, event_signal, crowding_ratio, displacement_cents)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, risk_level,
                  quote_yes_price, quote_yes_size, quote_no_price, quote_no_size,
                  volatility_level, inventory_level,
                  None if news_signal is None else int(news_signal),
                  None if event_signal is None else int(event_signal),
-                 crowding_ratio),
+                 crowding_ratio, displacement_cents),
             )
 
     def log_market_switch(

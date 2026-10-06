@@ -275,6 +275,7 @@ async def scoring_loop(
                     news_signal=state.risk_engine.news_signal,
                     event_signal=state.risk_engine.event_signal,
                     crowding_ratio=compute_crowding_ratio(book, state.target_size),
+                    displacement_cents=state.risk_engine.displacement_cents,
                 )
 
                 fill = quoting_policy.maybe_execute_stop_loss(

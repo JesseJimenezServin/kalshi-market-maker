@@ -164,6 +164,42 @@ VOLATILITY_WINDOW_SNAPSHOTS = 30
 VOLATILITY_ELEVATED_THRESHOLD = 1.5
 VOLATILITY_HIGH_THRESHOLD = 3.0
 
+# --------------------------------------------------------------------------
+# Displacement (trend) risk -- added after the 2026-10-06 incident
+# --------------------------------------------------------------------------
+# The stdev measure above is blind to a large move delivered smoothly. On
+# 2026-10-06 KXTRUMPAPPROVE-26OCT06-E38.5 repriced 7.5c -> 84.5c (11x) and
+# volatility_level read LOW in 12280 of 12415 snapshots (99.1%), so the
+# quote was never pulled: at 15:36, mid 84.50, we were still showing
+# YES 100@81c / NO 100@13c. Realised loss -$132.54, 13% of capital in ~3h.
+#
+# The reason is structural, not a bad threshold: stdev of TICK-TO-TICK
+# changes measures CHOPPINESS. A trend, or a gap between samples, produces
+# small per-tick changes and so reads calm. Displacement has to be measured
+# separately, as the peak-to-trough RANGE over a trailing window.
+#
+# Measured in CENTS, not percent, because P&L is linear in cents: a
+# contract's loss is net_contracts x price_move. An earlier attempt to
+# normalise by distance-to-bound was discarded during calibration -- it made
+# penny markets look explosive and a NORMAL market scored higher (3.33) than
+# the event market (2.14).
+#
+# Thresholds calibrated against the event and six normal markets
+# (~260k snapshots), trailing 300s range:
+#       threshold   event market   normal markets
+#         >= 8c         4.9%          0.0% - 1.2%
+#         >= 15c        1.4%          0.0%  (all six)
+# 15c gives clean separation, which matters because HIGH pulls the quote and
+# a pulled quote earns no incentive reward -- false positives cost revenue.
+#
+# HONEST LIMITATION: this is REACTIVE, not predictive. On the 10-06 event it
+# first crossed 15c at 12:48:07, by which point P&L was already -$78.35 of
+# the eventual -$132.54. It would have prevented roughly $54 of $132 (41%),
+# not the whole loss. Worth having; not a solution on its own.
+DISPLACEMENT_WINDOW_SECONDS = 300.0
+DISPLACEMENT_ELEVATED_THRESHOLD = 8.0
+DISPLACEMENT_HIGH_THRESHOLD = 15.0
+
 # Thresholds on abs(net_yes_contracts) / max_inventory that escalate risk level.
 INVENTORY_FRACTION_ELEVATED_THRESHOLD = 0.4
 INVENTORY_FRACTION_HIGH_THRESHOLD = 0.7

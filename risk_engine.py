@@ -38,6 +38,11 @@ class RiskEngine:
         default_factory=lambda: deque(maxlen=config.VOLATILITY_WINDOW_SNAPSHOTS),
         repr=False,
     )
+    # (ts, mid) trimmed to config.DISPLACEMENT_WINDOW_SECONDS. Time-based,
+    # not count-based like _mid_changes above: the whole point is to see a
+    # move that unfolds over minutes, which a fixed sample count cannot
+    # bound reliably when the tick cadence varies.
+    _mid_history: deque = field(default_factory=deque, repr=False)
     _news_active_until: float | None = field(default=None, repr=False)
     news_signal: bool = False
     event_signal: bool = False
@@ -48,6 +53,12 @@ class RiskEngine:
     # the final composite badge.
     volatility_level: str = LOW
     inventory_level: str = LOW
+    # Broken out separately rather than folded silently into
+    # volatility_level, because the 2026-10-06 incident was invisible
+    # precisely because a single "volatility: LOW" badge hid which term was
+    # being measured. displacement_cents is the raw number behind it.
+    displacement_level: str = LOW
+    displacement_cents: float = 0.0
 
     def register_news_event(self, now: float | None = None) -> None:
         """
@@ -86,9 +97,19 @@ class RiskEngine:
             self._mid_changes.append(mid_price - self._last_mid)
         self._last_mid = mid_price
 
+        self._mid_history.append((now, mid_price))
+        window = config.DISPLACEMENT_WINDOW_SECONDS
+        while self._mid_history and now - self._mid_history[0][0] > window:
+            self._mid_history.popleft()
+
         self.news_signal = self._news_active_until is not None and now < self._news_active_until
 
-        self.volatility_level = self._volatility_level()
+        # volatility_level is the WORSE of choppiness and displacement, so
+        # existing consumers (quoting_policy, the dashboard badge) react to
+        # either without change. The two terms are also exposed separately.
+        stdev_level = self._volatility_level()
+        self.displacement_cents, self.displacement_level = self._displacement()
+        self.volatility_level = _max_severity(stdev_level, self.displacement_level)
         self.inventory_level = self._inventory_level(inventory, max_inventory)
         # News hits and event-proximity both carry no direction/confidence
         # -- they only ever nudge risk up one notch (toward ELEVATED), never
@@ -97,6 +118,26 @@ class RiskEngine:
         event_level = ELEVATED if self.event_signal else LOW
         composite = _max_severity(_max_severity(self.volatility_level, self.inventory_level), news_level)
         self.risk_level = _max_severity(composite, event_level)
+
+    def _displacement(self) -> tuple[float, str]:
+        """
+        Peak-to-trough range of the mid over the trailing window, in cents,
+        and the risk level it implies.
+
+        Needs at least a few samples so a single reading cannot register a
+        range, and returns LOW until then -- same conservatism as the stdev
+        term, which waits for a full window rather than acting on a noisy
+        estimate.
+        """
+        if len(self._mid_history) < 5:
+            return 0.0, LOW
+        mids = [m for _, m in self._mid_history]
+        spread = max(mids) - min(mids)
+        if spread >= config.DISPLACEMENT_HIGH_THRESHOLD:
+            return spread, HIGH
+        if spread >= config.DISPLACEMENT_ELEVATED_THRESHOLD:
+            return spread, ELEVATED
+        return spread, LOW
 
     def _volatility_level(self) -> str:
         # Not enough samples yet for a meaningful stdev -- default to LOW

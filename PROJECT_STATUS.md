@@ -1699,6 +1699,77 @@ already predictive enough to act on. But that is a change to the risk
 model's definition, it would alter every risk_level in the run, and it
 wants deciding rather than slipping in during a performance pass.
 
+## 2026-10-06: displacement risk term, calibrated on the event that exposed the gap
+
+The 10-06 incident (-$132.54 on an 11x repricing, volatility_level LOW in
+99.1% of it) came down to a structural blind spot: RiskEngine measured
+volatility as the stdev of TICK-TO-TICK mid changes, which is CHOPPINESS.
+A move delivered smoothly, or as a gap between samples, has small per-tick
+changes and reads calm no matter how far the price travels.
+
+### The fix
+A second, independent term: peak-to-trough RANGE of the mid over a trailing
+window. volatility_level is now the worse of (stdev, displacement), so
+quoting_policy and the dashboard react to either with no change on their
+side, and both terms are exposed separately -- the incident was hard to
+diagnose precisely because one "volatility: LOW" badge hid which quantity
+was being measured. displacement_cents is now logged per quote snapshot
+(new column, migrated in place) so the next event is readable from data.
+
+### Calibration -- measured, not chosen
+Measured in CENTS, not percent, because P&L is linear in cents
+(net_contracts x price_move). A first attempt normalised the range by
+distance-to-nearer-bound and was DISCARDED during calibration: it made
+penny markets look explosive, and a normal market scored higher (3.33) than
+the event market (2.14). Absolute cents separates cleanly.
+
+Trailing 300s range, event market vs six normal markets (~260k snapshots):
+        threshold   event    normal
+        >= 8c        4.9%    0.0% - 1.2%
+        >= 15c       1.4%    0.0%  (all six)
+
+Then replayed the REAL mid series through the actual new RiskEngine rather
+than trusting the offline metric:
+    EVENT  OCT06-E38.5   LOW 95.2%  ELEV 3.4%  HIGH 1.4%   first HIGH 12:48
+    norm   OCT07-E38.2   LOW 100.0% ELEV 0.0%  HIGH 0.0%
+    norm   OCT06-E38.4   LOW  98.8% ELEV 1.2%  HIGH 0.0%
+    norm   OCT06-E38.6   LOW  99.6% ELEV 0.4%  HIGH 0.0%
+    norm   OCT05-E38.2   LOW 100.0% ELEV 0.0%  HIGH 0.0%
+Zero false HIGH on every normal market. That matters more than catching
+more of the event: HIGH pulls the quote, a pulled quote earns no incentive
+reward, and reward is the revenue.
+
+### Honest limitation: it is REACTIVE
+On the 10-06 event the term first crossed 15c at 12:48:07, when P&L was
+already -$78.35 of the eventual -$132.54. It would have prevented roughly
+$54 of $132 (41%), not the loss. Useful, not a solution. A displacement
+measure cannot be predictive by construction -- it needs the move to have
+happened.
+
+### The news signal CANNOT carry the predictive half -- measured
+The obvious next idea was that news fired at 12:13, ~30 minutes before the
+move, so news + any displacement should go straight to HIGH. That idea is
+dead, and the measurement kills it:
+    news_signal is active 61.2% of the time across 1.63M quote snapshots
+    and 95-100% of the time on many individual markets.
+It fired 30 minutes early because it fires essentially ALWAYS. Routing it
+to HIGH would pull quotes ~61% of the time and destroy the reward income
+the strategy exists to earn. NOT DONE.
+
+Corollary worth recording, because it reframes the whole risk picture: an
+always-on news signal pins risk_level at ELEVATED, which is why the event
+showed ELEVATED in 12382 of 12415 snapshots. ELEVATED therefore carries
+almost no information, and only HIGH actually changes behaviour. The real
+fix for the predictive half is to make news relevance SELECTIVE (tighten
+the keyword heuristic, or cut NEWS_SIGNAL_DECAY_MINUTES from 45), not to
+escalate it. That is its own piece of work and was not bundled in here.
+
+CONFIRMED live after deploy: displacement_cents logging (0.0 on calm
+markets), collector writing, no warnings, healthcheck exit 0.
+Three tests, including a PERFECTLY smooth ramp whose tick-to-tick stdev is
+exactly zero -- the pathological case the old measure cannot see by
+construction. It fails on the pre-fix engine with AttributeError.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

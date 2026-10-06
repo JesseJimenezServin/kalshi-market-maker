@@ -1225,6 +1225,81 @@ def test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate():
     print("test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate: PASS")
 
 
+def test_smooth_large_move_escalates_risk_even_though_stdev_stays_low():
+    """
+    THE 2026-10-06 BLIND SPOT, pinned.
+
+    KXTRUMPAPPROVE-26OCT06-E38.5 repriced 7.5c -> 84.5c and volatility_level
+    read LOW in 99.1% of snapshots, so the quote was never pulled and the
+    position lost $132.54. The cause is structural: stdev of TICK-TO-TICK
+    changes measures choppiness, and a smooth ramp has almost none.
+
+    This reproduces the pathological case exactly -- a PERFECTLY smooth ramp,
+    where tick-to-tick changes are constant and their stdev is therefore
+    ZERO. The old measure cannot see it by construction; displacement must.
+    """
+    eng = RiskEngine(ticker="RAMP")
+    inv = InventoryState(ticker="RAMP")
+    t0 = 1_000_000.0
+    mid = 7.5
+    step = (84.5 - 7.5) / 300.0          # a 77c move over 300 one-second ticks
+
+    for i in range(301):
+        eng.update(mid, inv, max_inventory=333, now=t0 + i)
+        mid += step
+
+    # the old term is blind: constant increments -> zero stdev
+    assert eng._volatility_level() == LOW, eng._volatility_level()
+    # the new term is not
+    assert eng.displacement_level == HIGH, (eng.displacement_level, eng.displacement_cents)
+    assert eng.displacement_cents >= config.DISPLACEMENT_HIGH_THRESHOLD
+    # and the composite the quoting policy actually reads escalates
+    assert eng.volatility_level == HIGH, eng.volatility_level
+    assert eng.risk_level == HIGH, eng.risk_level
+    print("test_smooth_large_move_escalates_risk_even_though_stdev_stays_low: PASS")
+
+
+def test_displacement_stays_low_on_a_calm_market_and_ages_out():
+    """
+    A pulled quote earns no incentive reward, so false positives cost
+    revenue directly. A calm market must stay LOW, and a past move must
+    stop counting once it leaves the window.
+    """
+    eng = RiskEngine(ticker="CALM")
+    inv = InventoryState(ticker="CALM")
+    t0 = 1_000_000.0
+
+    # 1c of wobble for 10 minutes -> never escalates
+    for i in range(600):
+        eng.update(50.0 + (i % 2), inv, max_inventory=333, now=t0 + i)
+    assert eng.displacement_level == LOW, (eng.displacement_level, eng.displacement_cents)
+    assert eng.displacement_cents <= 2.0
+
+    # a genuine jump escalates ...
+    for i in range(10):
+        eng.update(70.0, inv, max_inventory=333, now=t0 + 600 + i)
+    assert eng.displacement_level == HIGH, eng.displacement_cents
+
+    # ... and then ages out of the trailing window once it is history
+    later = t0 + 600 + config.DISPLACEMENT_WINDOW_SECONDS + 60
+    for i in range(10):
+        eng.update(70.0, inv, max_inventory=333, now=later + i)
+    assert eng.displacement_level == LOW, (eng.displacement_level, eng.displacement_cents)
+    print("test_displacement_stays_low_on_a_calm_market_and_ages_out: PASS")
+
+
+def test_displacement_needs_a_few_samples_before_reporting():
+    """One reading is not a range -- do not act on an undefined estimate."""
+    eng = RiskEngine(ticker="NEW")
+    inv = InventoryState(ticker="NEW")
+    eng.update(10.0, inv, max_inventory=333, now=1_000_000.0)
+    assert eng.displacement_level == LOW
+    assert eng.displacement_cents == 0.0
+    eng.update(90.0, inv, max_inventory=333, now=1_000_001.0)
+    assert eng.displacement_level == LOW, "2 samples must not yet register a range"
+    print("test_displacement_needs_a_few_samples_before_reporting: PASS")
+
+
 def test_risk_engine_exposes_sub_level_breakdown():
     engine = RiskEngine(ticker="TEST")
     inventory = InventoryState(ticker="TEST", net_yes_contracts=420)  # 420/500 = 0.84 -> HIGH
@@ -1547,6 +1622,9 @@ if __name__ == "__main__":
     test_settlement_replaces_the_frozen_unrealized_mark()
     test_dead_market_detection_requires_sustained_empty_book()
     test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate()
+    test_smooth_large_move_escalates_risk_even_though_stdev_stays_low()
+    test_displacement_stays_low_on_a_calm_market_and_ages_out()
+    test_displacement_needs_a_few_samples_before_reporting()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()
     test_recency_must_be_measured_from_build_start_not_after_queries()
