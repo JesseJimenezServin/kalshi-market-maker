@@ -1620,6 +1620,85 @@ OCT06-E38.4/.5/.6; collector writing; healthcheck exit 0; no warnings.
 Four tests added, including the old density formula pinned as a negative
 assertion and the exact 66x case as a blocked switch.
 
+## 2026-10-06: dashboard build 34s -> 0.31s; and the first real adverse-selection event
+
+### Build cost: 34s -> 0.31s steady state (110x)
+Profiled rather than guessed, after being wrong twice doing the latter.
+
+    component                          before    after
+    _performance_history               13.29s    0.02s
+    _qualifying_counts                  4.59s    0.02s
+    _latest_per_ticker(quote_snapshots) 5.67s    ~0
+    _latest_per_ticker(inventory_marks) 5.00s    ~0
+    _latest_per_ticker(snapshot_scores) 1.24s    ~0
+    FULL BUILD                        ~34s       0.31s
+
+Three distinct causes:
+
+(a) _performance_history ran two window functions across the whole 336h
+lookback every tick (11.49s and 11.79s measured individually). All three
+series are CUMULATIVE over immutable history, so the SQL now covers only
+the newest bucket onward and the Python walk that turns per-bucket values
+into running totals is redone each tick -- 1.6k buckets, free. The window
+functions are gone too: plain GROUP BY with MAX(ts) gives identical answers
+and was ~35% faster even uncached. Verified against the old implementation:
+pnl_dollars and balance_dollars EXACT to the cent, reward_dollars within
+$0.02, identical point counts (1655).
+
+(b) _qualifying_counts grouped the ENTIRE snapshot_scores table, no time
+bound, every ticker ever watched, to produce numbers for the 3 on screen.
+Now scoped to the rendered tickers. Counts remain lifetime, which is the
+intended meaning; only the rows scanned changed.
+
+(c) THE SUBTLE ONE. Bounding the per-ticker queries with `WHERE ts >= ?`
+barely helped -- 5.00s -> 4.26s -- because SQLite satisfies GROUP BY ticker
+by walking the whole (ticker, ts) COVERING INDEX and will not use a
+composite index's SECOND column to restrict a range. EXPLAIN QUERY PLAN
+confirmed `SCAN ... USING COVERING INDEX idx_marks_ticker_ts`: 1.3M index
+entries to return 3 rows. Split into two steps instead --
+_active_tickers_since() forces the ts-leading index with INDEXED BY
+(0.000s), then every detail query is scoped by ticker where equality seeks
+are fast (0.042s). Added idx_quote_snapshots_ts, which that table lacked,
+and the probe degrades gracefully to an unhinted query if an index is
+missing on an older DB.
+
+WS_TICK_SECONDS 15.0 -> 3.0, following the note left in the code: the right
+value is a function of the build cost, and at 0.31s a 15s tick left the
+dashboard needlessly stale. Measured through the real WebSocket: 3.3/3.5/3.2s
+cadence, load 0.71 with a client attached, ~10% duty cycle.
+
+### The first real adverse-selection event -- and a risk blind spot
+Balance went $1003.12 -> $857.44. Essentially all of it is one market,
+KXTRUMPAPPROVE-26OCT06-E38.5, realised -$132.54 between 12:00 and 16:00 UTC.
+
+What happened: the mid went 7.50c -> 54.50c -> 84.50c, an 11x repricing on
+a news event (Trump approval crossing 38.5). We had accumulated a large
+NO position while YES was cheap -- fills include 1500 contracts of NO at
+88c, 655 at 89c, 519 at 90c, 467 at 92c, i.e. selling YES at 8-12c -- and
+YES then settled toward 85c. The flatten machinery closed it out near flat
+(net -9), converting unrealised into realised. This is exactly the risk
+adverse_selection_sim.py exists to measure, and it is the first time it has
+been measured on clean data: ONE repricing cost 13% of capital in ~3 hours.
+
+THE BLIND SPOT, which is the actionable part. Through that entire move:
+    volatility_level: LOW in 12280 snapshots, ELEVATED 105, HIGH 30
+    risk_level:       ELEVATED 12382, HIGH 33
+Volatility read LOW through 99.1% of an 11x repricing, so the quote was
+never pulled -- at 15:36, with the mid at 84.50, we were still showing
+YES 100@81c / NO 100@13c. RiskEngine measures volatility as the stdev of
+TICK-TO-TICK mid changes in cents. A large move delivered smoothly, or as a
+gap between samples, produces small per-tick changes: the proxy measures
+CHOPPINESS, not DISPLACEMENT. It cannot see a trend by construction.
+Note the news signal DID fire at 12:13, ~40 minutes before the move, and
+fed risk as one input without ever escalating to HIGH.
+
+NOT FIXED, deliberately: adding a displacement term (|mid now - mid N
+minutes ago|, relative to price) alongside the stdev term is the obvious
+candidate, and the news signal firing 40 minutes early suggests it is
+already predictive enough to act on. But that is a change to the risk
+model's definition, it would alter every risk_level in the run, and it
+wants deciding rather than slipping in during a performance pass.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

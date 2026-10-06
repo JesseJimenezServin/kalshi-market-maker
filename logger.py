@@ -176,6 +176,12 @@ CREATE INDEX IF NOT EXISTS idx_market_switches_ts ON market_switches(ts);
 -- they cost ~25MB on a ~1GB database.
 CREATE INDEX IF NOT EXISTS idx_scores_ts ON snapshot_scores(ts);
 CREATE INDEX IF NOT EXISTS idx_marks_ts ON inventory_marks(ts);
+-- ts-leading index for server.py's _active_tickers_since probe. Without it
+-- that query falls back to walking the whole (ticker, ts) covering index,
+-- because SQLite will not use a composite index's SECOND column to restrict
+-- a range. With it, "who is quoting right now" is a 0.000s index seek
+-- instead of a ~4s full scan (measured 2026-10-06 on a 1.3GB database).
+CREATE INDEX IF NOT EXISTS idx_quote_snapshots_ts ON quote_snapshots(ts);
 CREATE INDEX IF NOT EXISTS idx_event_calendar_ticker_ts ON event_calendar_snapshots(ticker, ts);
 """
 

@@ -36,6 +36,7 @@ from server import (
     _program_reward_per_second,
 )
 import quoting_policy
+import server
 from incentive_screener import _reward_density
 import config
 
@@ -1257,6 +1258,34 @@ def test_risk_reason_attributes_only_the_actual_driving_factor():
     print("test_risk_reason_attributes_only_the_actual_driving_factor: PASS")
 
 
+def test_recency_must_be_measured_from_build_start_not_after_queries():
+    """
+    The 2026-10-05 dashboard bug. build_dashboard_payload captured its
+    `now` AFTER running every query. A build takes 9-25s on the Droplet
+    against RECENCY_CUTOFF_SEC = 20s, so on a slow build rows that were
+    fresh when READ were judged stale, active_tickers came out empty, and
+    the markets table silently fell back to config.WATCHED_MARKET_TICKERS
+    -- three unrelated markets rendered as score 0 / pool $0 / risk None.
+
+    This pins the arithmetic that made it possible: identical data, two
+    different reference times, opposite verdicts.
+    """
+    build_start = time.time()
+    row = {"ts": build_start - 0.5}          # fresh when the build began
+
+    assert _is_recent(row, build_start) is True
+
+    # what the old code effectively did: judge it after a slow build
+    after_slow_build = build_start + server.RECENCY_CUTOFF_SEC + 5.0
+    assert _is_recent(row, after_slow_build) is False
+
+    # and a genuinely stale row is still caught from build start, so the
+    # fix does not mask a stalled collector
+    stale = {"ts": build_start - (server.RECENCY_CUTOFF_SEC + 5.0)}
+    assert _is_recent(stale, build_start) is False
+    print("test_recency_must_be_measured_from_build_start_not_after_queries: PASS")
+
+
 def test_is_recent_uses_cutoff():
     now = time.time()
     assert _is_recent({"ts": now - 1.0}, now) is True
@@ -1520,6 +1549,7 @@ if __name__ == "__main__":
     test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()
+    test_recency_must_be_measured_from_build_start_not_after_queries()
     test_is_recent_uses_cutoff()
     test_capital_allocation_drops_stale_tickers()
     test_performance_history_merges_per_ticker_rows_into_one_point_per_bucket()

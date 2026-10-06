@@ -72,6 +72,26 @@ SimulationLogger()
 RECENT_FILLS_LIMIT = 10
 
 
+# Per-bucket reward accrual, memoised across ticks.
+#
+# reward_dollars is a CUMULATIVE series over immutable history: once a
+# 5-minute bucket is complete its contribution can never change. Recomputing
+# the whole lookback window every tick took the dashboard build from 9.3s to
+# 40.7s on a 1.36GB database (measured 2026-10-05), pushing the duty cycle
+# back to ~73% on a single vCPU shared with the collector -- undoing the tick
+# optimisation from earlier the same day.
+#
+# Only the newest (partial) bucket and anything not yet seen needs
+# recomputing. That also makes the query's `ts >=` predicate narrow enough
+# for idx_scores_ts to actually help, instead of matching every row.
+_reward_bucket_accrual: dict[int, float] = {}
+_reward_bucket_end_ts: dict[int, float] = {}
+_hist_score_bucket: dict[int, float] = {}
+_hist_score_ts: dict[int, float] = {}
+_hist_pnl_bucket: dict[int, dict[str, float]] = {}
+_hist_pnl_ts: dict[int, float] = {}
+
+
 def _program_reward_per_second(program) -> float | None:
     """
     Dollars of incentive pool paid per second, from the program's own
@@ -121,11 +141,43 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _active_tickers_since(conn: sqlite3.Connection, since_ts: float) -> list[str]:
+    """
+    Tickers with any inventory or quote row since `since_ts`.
+
+    Deliberately a separate, tiny query rather than a bound on the big
+    latest-per-ticker queries. Those GROUP BY ticker, and SQLite satisfies
+    that by walking the whole (ticker, ts) covering index -- it ignores a
+    `ts >=` bound because ts is the index's SECOND column. Measured
+    2026-10-06 on a 1.3GB DB: ~4s each to return 3 rows. INDEXED BY forces
+    the ts-leading index instead, which is what makes the bound actually
+    restrict anything: 0.000s for the same answer. The detail queries are
+    then scoped by ticker, where equality seeks on (ticker, ts) are fast
+    (0.042s).
+    """
+    found: set[str] = set()
+    for table, hint in (("inventory_marks", "INDEXED BY idx_marks_ts"),
+                        ("quote_snapshots", "INDEXED BY idx_quote_snapshots_ts")):
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT ticker FROM {table} {hint} WHERE ts >= ?", (since_ts,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Index not present yet (pre-migration DB). Correctness first:
+            # fall back to the unhinted query, which is slower but right.
+            rows = conn.execute(
+                f"SELECT DISTINCT ticker FROM {table} WHERE ts >= ?", (since_ts,)
+            ).fetchall()
+        found.update(r["ticker"] for r in rows)
+    return sorted(found)
+
+
 def _latest_per_ticker(
     conn: sqlite3.Connection,
     table: str,
     columns: str,
     tickers: list[str] | None = None,
+    since_ts: float | None = None,
 ) -> dict[str, sqlite3.Row]:
     """
     Newest row per ticker.
@@ -157,13 +209,16 @@ def _latest_per_ticker(
     select named columns, so it does not reach the JSON payload -- do not
     dict() these rows wholesale without dropping it.
     """
+    where = "" if since_ts is None else " WHERE ts >= ?"
+    bound = [] if since_ts is None else [since_ts]
     if tickers is None:
         rows = conn.execute(
             f"""
             SELECT {columns}, max(ts) AS _max_ts
-            FROM {table}
+            FROM {table}{where}
             GROUP BY ticker
-            """
+            """,
+            bound,
         ).fetchall()
     else:
         # Restricting by ticker turns a walk of the whole (ticker, ts) index
@@ -179,9 +234,10 @@ def _latest_per_ticker(
             SELECT {columns}, max(ts) AS _max_ts
             FROM {table}
             WHERE ticker IN ({placeholders})
+            {'AND ts >= ?' if since_ts is not None else ''}
             GROUP BY ticker
             """,
-            wanted,
+            (*wanted, *bound),
         ).fetchall()
     return {row["ticker"]: row for row in rows}
 
@@ -199,22 +255,45 @@ def _recent_fills(conn: sqlite3.Connection, limit: int = RECENT_FILLS_LIMIT) -> 
     return [dict(r) for r in rows]
 
 
-def _qualifying_counts(conn: sqlite3.Connection) -> dict[str, dict]:
+def _qualifying_counts(conn: sqlite3.Connection, tickers: list[str] | None = None) -> dict[str, dict]:
     """
     Running count (over everything collected so far) of "clean" snapshots
     where both sides reached Target Size, vs. total -- reuses the same
     qualifies_yes/qualifies_no values main.py already computed and logged,
     no rescoring.
     """
-    rows = conn.execute(
-        """
-        SELECT ticker,
-               SUM(CASE WHEN qualifies_yes = 1 AND qualifies_no = 1 THEN 1 ELSE 0 END) AS qualifying,
-               COUNT(*) AS total
-        FROM snapshot_scores
-        GROUP BY ticker
-        """
-    ).fetchall()
+    # Scoped to the tickers actually being rendered. Unscoped this grouped
+    # the ENTIRE snapshot_scores table -- every ticker ever watched, with no
+    # time bound -- to produce numbers for the 3 on screen: 4.59s of a 34s
+    # build on 2026-10-05, growing with the run. Counts stay lifetime
+    # ("over everything collected so far"), which is the intended meaning;
+    # only the rows scanned change.
+    if tickers is None:
+        rows = conn.execute(
+            """
+            SELECT ticker,
+                   SUM(CASE WHEN qualifies_yes = 1 AND qualifies_no = 1 THEN 1 ELSE 0 END) AS qualifying,
+                   COUNT(*) AS total
+            FROM snapshot_scores
+            GROUP BY ticker
+            """
+        ).fetchall()
+    else:
+        wanted = list(tickers)
+        if not wanted:
+            return {}
+        placeholders = ",".join("?" * len(wanted))
+        rows = conn.execute(
+            f"""
+            SELECT ticker,
+                   SUM(CASE WHEN qualifies_yes = 1 AND qualifies_no = 1 THEN 1 ELSE 0 END) AS qualifying,
+                   COUNT(*) AS total
+            FROM snapshot_scores
+            WHERE ticker IN ({placeholders})
+            GROUP BY ticker
+            """,
+            wanted,
+        ).fetchall()
     return {r["ticker"]: {"qualifying": r["qualifying"], "total": r["total"]} for r in rows}
 
 
@@ -249,92 +328,90 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
       - balance_dollars: config.STARTING_CAPITAL_USD + pnl_dollars --
         the pretend account balance over time (see capital_allocator.py).
     """
-    cutoff_ts = time.time() - config.PERFORMANCE_HISTORY_LOOKBACK_HOURS * 3600
-    bucket = config.PERFORMANCE_HISTORY_BUCKET_SECONDS
-
+    bucket = float(config.PERFORMANCE_HISTORY_BUCKET_SECONDS)
+    cutoff_ts = time.time() - config.PERFORMANCE_HISTORY_LOOKBACK_HOURS * 3600.0
     excl_sql, excl_params = _exclusion_clause()
 
-    score_rows = conn.execute(
-        f"""
-        SELECT ts, cumulative FROM (
-            SELECT ts,
-                   SUM(combined_score) OVER (ORDER BY ts) AS cumulative,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY CAST(ts / ? AS INTEGER) ORDER BY ts DESC
-                   ) AS rn
-            FROM snapshot_scores
-            WHERE ts > ?{excl_sql}
-        )
-        WHERE rn = 1
-        ORDER BY ts ASC
-        """,
-        (bucket, cutoff_ts, *excl_params),
-    ).fetchall()
-    reward_series = [{"ts": r["ts"], "value": r["cumulative"] or 0.0} for r in score_rows]
+    # All three series are CUMULATIVE over immutable history: once a bucket
+    # is complete its contribution can never change. So the SQL only covers
+    # the newest (possibly partial) bucket onward, and the Python walk that
+    # turns per-bucket values into running totals is re-done each tick --
+    # that walk is over ~1.6k buckets and costs nothing.
+    #
+    # Before this, each tick ran two window functions across the whole
+    # lookback window. Measured 2026-10-05 on a 1.36GB DB: 11.49s and
+    # 11.79s respectively, which was most of a 34s dashboard build. The
+    # window functions are also gone -- a plain GROUP BY with MAX(ts) gets
+    # the same answers and was ~35% faster even uncached.
+    oldest_bucket = int(cutoff_ts // bucket)
+    for cache in (_hist_score_bucket, _hist_score_ts,
+                  _hist_pnl_bucket, _hist_pnl_ts,
+                  _reward_bucket_accrual, _reward_bucket_end_ts):
+        for b in [b for b in cache if b < oldest_bucket]:
+            del cache[b]
 
-    pnl_rows = conn.execute(
+    # ---- reward score (unitless, cumulative sum of combined_score) ------
+    resume = max(_hist_score_bucket, default=oldest_bucket)
+    for r in conn.execute(
         f"""
-        SELECT ts, ticker, unrealized_pnl_cents, realized_pnl_cents FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY ticker, CAST(ts / ? AS INTEGER) ORDER BY ts DESC
-            ) AS rn
-            FROM inventory_marks
-            WHERE ts > ?{excl_sql}
-        )
-        WHERE rn = 1
-        ORDER BY ts ASC
+        SELECT CAST(ts / ? AS INTEGER) AS b, SUM(combined_score) AS s, MAX(ts) AS ts
+        FROM snapshot_scores WHERE ts >= ?{excl_sql}
+        GROUP BY b ORDER BY b ASC
         """,
-        (bucket, cutoff_ts, *excl_params),
-    ).fetchall()
-    # pnl_rows has one row per (ticker, bucket) -- up to num_tickers rows
-    # landing in the SAME bucket. Emit exactly one COMBINED point per
-    # bucket (not one point per ticker-row), so pnl_dollars/balance_dollars
-    # have the same point density as reward_score above -- otherwise the
-    # two series end up with very different lengths and, plotted against
-    # a shared x-axis, one visibly stops well short of the other's actual
-    # end (CONFIRMED live 2026-09-02: reward_score had 169 points vs
-    # pnl_dollars' 363, so the reward line stopped roughly halfway across
-    # a chart whose x-axis was sized to the longer series).
-    last_pnl_by_ticker: dict[str, float] = {}
+        (bucket, float(resume * bucket), *excl_params),
+    ).fetchall():
+        _hist_score_bucket[r["b"]] = r["s"] or 0.0
+        _hist_score_ts[r["b"]] = r["ts"]
+
+    reward_series = []
+    running = 0.0
+    for b in sorted(_hist_score_bucket):
+        running += _hist_score_bucket[b]
+        reward_series.append({"ts": _hist_score_ts[b], "value": running})
+
+    # ---- simulated P&L and balance --------------------------------------
+    # One COMBINED point per bucket, not one per ticker-row, so this series
+    # has the same point density as reward_score above -- otherwise the two
+    # lines are different lengths and, on a shared x-axis, one visibly stops
+    # short of the other (CONFIRMED live 2026-09-02).
+    #
+    # A ticker's contribution is carried FORWARD from its last known mark
+    # once it stops logging rather than dropped, so switching away from a
+    # market cannot cause a phantom balance jump. That carry-forward is why
+    # the Python walk below has to start from the oldest bucket every tick,
+    # even though the SQL does not.
+    resume = max(_hist_pnl_bucket, default=oldest_bucket)
+    for r in conn.execute(
+        f"""
+        SELECT CAST(ts / ? AS INTEGER) AS b, ticker,
+               unrealized_pnl_cents, realized_pnl_cents, MAX(ts) AS ts
+        FROM inventory_marks WHERE ts >= ?{excl_sql}
+        GROUP BY b, ticker ORDER BY b ASC
+        """,
+        (bucket, float(resume * bucket), *excl_params),
+    ).fetchall():
+        marks = _hist_pnl_bucket.setdefault(r["b"], {})
+        marks[r["ticker"]] = (r["unrealized_pnl_cents"] or 0.0) + (r["realized_pnl_cents"] or 0.0)
+        _hist_pnl_ts[r["b"]] = max(_hist_pnl_ts.get(r["b"], 0.0), r["ts"])
+
     pnl_series = []
     balance_series = []
-    current_bucket = None
-    bucket_end_ts = None
-    for r in pnl_rows:
-        row_bucket = int(r["ts"] // bucket)
-        if current_bucket is not None and row_bucket != current_bucket:
-            pnl_dollars = sum(last_pnl_by_ticker.values()) / 100.0
-            pnl_series.append({"ts": bucket_end_ts, "value": pnl_dollars})
-            balance_series.append({"ts": bucket_end_ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
-        current_bucket = row_bucket
-        bucket_end_ts = r["ts"]
-        total_cents = (r["unrealized_pnl_cents"] or 0.0) + (r["realized_pnl_cents"] or 0.0)
-        last_pnl_by_ticker[r["ticker"]] = total_cents
-    if current_bucket is not None:
-        pnl_dollars = sum(last_pnl_by_ticker.values()) / 100.0
-        pnl_series.append({"ts": bucket_end_ts, "value": pnl_dollars})
-        balance_series.append({"ts": bucket_end_ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
+    last_by_ticker: dict[str, float] = {}
+    for b in sorted(_hist_pnl_bucket):
+        last_by_ticker.update(_hist_pnl_bucket[b])
+        pnl_dollars = sum(last_by_ticker.values()) / 100.0
+        ts = _hist_pnl_ts[b]
+        pnl_series.append({"ts": ts, "value": pnl_dollars})
+        balance_series.append({"ts": ts, "value": config.STARTING_CAPITAL_USD + pnl_dollars})
 
-    # ------------------------------------------------------------------
-    # reward_dollars: an ESTIMATE of incentive income, so the two halves of
-    # the strategy are finally in the same units.
-    #
-    # Until now the dashboard measured costs in dollars (pnl_dollars) and
-    # revenue in a unitless score, which made the central question of this
-    # project -- does reward income exceed adverse selection? -- impossible
-    # to read off the chart.
-    #
+    # ---- estimated reward income in dollars ------------------------------
     # Kalshi pools 2.0 of snapshot score per snapshot across ALL
     # participants, so our fraction of a program's pool is
-    # combined_score / 2.0. Multiplying by the program's dollars-per-second
-    # and the time actually spent quoting gives dollars.
+    # combined_score / 2.0, times the program's dollars-per-second, times
+    # the time actually spent quoting.
     #
-    # THIS IS AN UPPER BOUND, not a forecast. my_share models our order
-    # added on top of the existing book with nobody reacting; resting real
-    # size in a $60k/day program would draw a competitive response that
-    # grows the denominator and shrinks our share. reward_simulator.py's
-    # module docstring says the same thing. Treat it as "what we would earn
-    # if the rest of the book ignored us".
+    # UPPER BOUND, not a forecast: my_share models our order added on top of
+    # the existing book with nobody reacting. See reward_simulator.py.
     rate_by_ticker: dict[str, float] = {}
     for prog in conn.execute(
         """
@@ -348,37 +425,31 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
         if rate is not None:
             rate_by_ticker[prog["ticker"]] = rate
 
-    bucket_rows = conn.execute(
+    resume = max(_reward_bucket_accrual, default=oldest_bucket)
+    fresh: dict[int, float] = {}
+    for r in conn.execute(
         f"""
         SELECT CAST(ts / ? AS INTEGER) AS b, ticker,
                AVG(combined_score) AS mean_score, MAX(ts) AS ts
-        FROM snapshot_scores
-        WHERE ts > ?{excl_sql}
-        GROUP BY b, ticker
-        ORDER BY b ASC
+        FROM snapshot_scores WHERE ts >= ?{excl_sql}
+        GROUP BY b, ticker ORDER BY b ASC
         """,
-        (bucket, cutoff_ts, *excl_params),
-    ).fetchall()
+        (bucket, float(resume * bucket), *excl_params),
+    ).fetchall():
+        rate = rate_by_ticker.get(r["ticker"])
+        fresh[r["b"]] = fresh.get(r["b"], 0.0) + (
+            ((r["mean_score"] or 0.0) / 2.0) * rate * bucket if rate else 0.0
+        )
+        _reward_bucket_end_ts[r["b"]] = max(_reward_bucket_end_ts.get(r["b"], 0.0), r["ts"])
+    _reward_bucket_accrual.update(fresh)
 
     reward_dollars_series = []
-    cumulative_reward = 0.0
-    current_bucket = None
-    bucket_end_ts = None
-    bucket_accrual = 0.0
-    for r in bucket_rows:
-        if current_bucket is not None and r["b"] != current_bucket:
-            cumulative_reward += bucket_accrual
-            reward_dollars_series.append({"ts": bucket_end_ts, "value": cumulative_reward})
-            bucket_accrual = 0.0
-        current_bucket = r["b"]
-        bucket_end_ts = r["ts"]
-        rate = rate_by_ticker.get(r["ticker"])
-        if rate:
-            # share of pool  x  $/s  x  seconds in this bucket
-            bucket_accrual += ((r["mean_score"] or 0.0) / 2.0) * rate * bucket
-    if current_bucket is not None:
-        cumulative_reward += bucket_accrual
-        reward_dollars_series.append({"ts": bucket_end_ts, "value": cumulative_reward})
+    running = 0.0
+    for b in sorted(_reward_bucket_accrual):
+        running += _reward_bucket_accrual[b]
+        ts = _reward_bucket_end_ts.get(b)
+        if ts is not None:
+            reward_dollars_series.append({"ts": ts, "value": running})
 
     return {
         "reward_score": reward_series,
@@ -446,14 +517,17 @@ def _risk_reason(
 # duplicating the live ticker it had been switched away FROM.
 RECENCY_CUTOFF_SEC = 20.0
 
-# Seconds between dashboard payload builds. Was 1.0, which was aspirational
-# rather than real: a build cost ~25s on 2026-10-03, so an attached browser
-# kept the loop ~96% busy and starved main.py of the Droplet's single vCPU
-# while contributing nothing -- nobody saw a 1s refresh. Making the interval
-# explicit hands the core back between builds. Keep this comfortably above
-# the real build cost; if the build is ever optimised well below this,
-# lower it rather than leaving the dashboard needlessly stale.
-WS_TICK_SECONDS = 15.0
+# Seconds between dashboard payload builds.
+#
+# History, because the right value is entirely a function of the build cost:
+# it was an aspirational 1.0 when a build cost ~25s, which kept the loop
+# ~96% busy and starved main.py of the single vCPU while nobody ever saw a
+# 1s refresh. Raised to 15.0 on 2026-10-03 when the build was ~9s. The build
+# is now ~0.31s steady-state (2026-10-06, after memoising the history series
+# and scoping every per-ticker query), so 3.0 gives a responsive dashboard
+# at roughly a 10% duty cycle. Keep this comfortably above the real build
+# cost, and revisit it in either direction when that cost changes.
+WS_TICK_SECONDS = 3.0
 
 
 def _is_recent(row: sqlite3.Row | None, now: float) -> bool:
@@ -491,29 +565,42 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
     (the ts of its previous tick), so every connected client sees each
     event flash exactly once, independent of other clients.
     """
+    # Captured BEFORE the queries, not after.
+    #
+    # This is the reference time for the RECENCY_CUTOFF_SEC staleness test
+    # below. It used to be read after every query had run, and a build takes
+    # 9-25s on this box against a 20s cutoff -- so on any slow build, rows
+    # that were fresh when read were judged stale, active_tickers came out
+    # empty, and the markets table silently fell back to
+    # config.WATCHED_MARKET_TICKERS: three unrelated markets with no data,
+    # rendered as score 0.00000 / pool $0 / risk None. CONFIRMED 2026-10-05
+    # on a cold build right after a restart, which is exactly when someone
+    # would open the dashboard.
+    #
+    # Measuring freshness from the START of the build also means a slow
+    # build can no longer mask a genuinely stalled collector: if the newest
+    # row was already >20s old when we began, that is real staleness.
+    now = time.time()
     conn = _connect()
     try:
-        scores = _latest_per_ticker(
-            conn, "snapshot_scores",
-            "ticker, ts, qualifies_yes, qualifies_no, my_share_yes, my_share_no, "
-            "combined_score, reference_price_yes, reference_price_no",
-        )
+        # Find who is live with one cheap probe, then fetch detail ONLY for
+        # those tickers. The floor is generous relative to
+        # RECENCY_CUTOFF_SEC so a slow build cannot narrow the candidate set
+        # before the real staleness test below.
+        freshness_floor = now - (RECENCY_CUTOFF_SEC * 10.0)
+        live = _active_tickers_since(conn, freshness_floor)
         inventory = _latest_per_ticker(
             conn, "inventory_marks",
             "ticker, ts, net_yes_contracts, avg_entry_price, mid_price, "
             "unrealized_pnl_cents, realized_pnl_cents, max_inventory",
-        )
-        programs = _latest_per_ticker(
-            conn, "incentive_program_snapshots",
-            "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining, "
-            "start_date, end_date",
+            live,
         )
         quotes = _latest_per_ticker(
             conn, "quote_snapshots",
             "ticker, ts, risk_level, quote_yes_price, quote_yes_size, quote_no_price, quote_no_size, "
             "volatility_level, inventory_level, news_signal, event_signal, crowding_ratio",
+            live,
         )
-        qualifying_counts = _qualifying_counts(conn)
         flash_tickers = _recent_event_tickers(conn, since_ts) if since_ts is not None else set()
         metadata = _market_metadata(conn)
 
@@ -525,7 +612,6 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         # static config list only if NOTHING is currently active (e.g.
         # main.py isn't running yet), so the table still shows a helpful
         # pre-data hint instead of a totally empty state.
-        now = time.time()
         active_tickers = {t for t, r in inventory.items() if _is_recent(r, now)} | \
             {t for t, r in quotes.items() if _is_recent(r, now)}
         tickers = sorted(active_tickers) if active_tickers else sorted(set(config.WATCHED_MARKET_TICKERS))
@@ -542,6 +628,20 @@ def build_dashboard_payload(since_ts: float | None = None) -> dict:
         books = _latest_per_ticker(
             conn, "orderbook_snapshots", "ticker, ts, yes_levels, no_levels", tickers
         )
+        # Scoped to the rendered tickers, same reasoning as books above.
+        scores = _latest_per_ticker(
+            conn, "snapshot_scores",
+            "ticker, ts, qualifies_yes, qualifies_no, my_share_yes, my_share_no, "
+            "combined_score, reference_price_yes, reference_price_no",
+            tickers,
+        )
+        programs = _latest_per_ticker(
+            conn, "incentive_program_snapshots",
+            "ticker, ts, period_reward, target_size, discount_factor_bps, days_remaining, "
+            "start_date, end_date",
+            tickers,
+        )
+        qualifying_counts = _qualifying_counts(conn, tickers)
 
         markets = []
         for ticker in tickers:
