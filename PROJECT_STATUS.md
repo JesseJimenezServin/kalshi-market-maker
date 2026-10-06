@@ -1770,6 +1770,94 @@ Three tests, including a PERFECTLY smooth ramp whose tick-to-tick stdev is
 exactly zero -- the pathological case the old measure cannot see by
 construction. It fails on the pre-fix engine with AttributeError.
 
+## 2026-10-06: risk signals calibrated against reality; run ready to reset
+
+Both advisory risk inputs were measured against actual price behaviour.
+One was wider than the markets' entire lifetime; the other had NEGATIVE
+predictive value. Between them they caused 79.9% of all ELEVATED risk
+while volatility and inventory were both LOW.
+
+This mattered because ELEVATED is not cosmetic: it widens the quote by
+WIDEN_TICKS_ELEVATED, and quoting away from the Reference Price lowers the
+distance multiplier in the reward formula. So two uninformative signals
+were quietly suppressing the revenue the project exists to measure, 81.5%
+of the time.
+
+### event_signal: window was wider than the market's life
+EVENT_CALENDAR_WARNING_HOURS was 48, but the Trump approval contracts run
+on a 24-HOUR cycle -- every snapshot was inside the window, so the signal
+could never turn off (60.0% active; the rest is markets with no calendar
+data).
+Calibrated on 300s mid displacement bucketed by hours-until-close, six
+markets:
+        0-1h     0.0% of snapshots >= 8c   (book already emptying)
+        1-2h    11.3%
+        2-4h    10.7%
+        4-8h     5.1%
+        8-24h    0.4%
+        24-48h   0.0%
+Risk is concentrated in 1-4h before close. Set to 4.0h: keeps both
+high-risk buckets with margin, excludes the 8-48h dead zone that caused
+the always-on behaviour.
+
+### news_signal: measured to be ANTI-predictive
+P(mid displacement >= 8c within 30 min) after a news hit vs at a random
+moment, per market:
+        OCT06-E38.5   11.7%  vs  14.5%
+        OCT06-E38.4    5.2%  vs   7.5%
+        OCT06-E38.6    3.1%  vs   4.1%
+        OCT05-E38.2    0.0%  vs   0.0%
+        OCT05-E38.4    0.0%  vs   0.0%
+        OCT04-E38.1   18.4%  vs  20.8%
+A news hit made a large move LESS likely than a coin-flip moment, in EVERY
+market. Combined with firing 61.2% of the time, it was not a warning --
+it was a constant.
+NEWS_SIGNAL_AFFECTS_RISK = False gates it out of the composite.
+news_events collection, the news_signal field and the dashboard flag are
+all DELIBERATELY KEPT: 15711 logged articles are research material for a
+better relevance heuristic, and re-enabling is a one-line flag once
+relevance can beat the baseline above. Only the effect on risk_level is
+removed.
+
+This also retires my own earlier hypothesis, recorded here because the
+reasoning was wrong in an instructive way: the 10-06 incident log showed
+news firing ~30 minutes BEFORE the repricing, which looked predictive. It
+fired 30 minutes early because it fires essentially always. A signal that
+is on 61% of the time will always appear to precede any event.
+
+### Projected effect, replayed through the new engine
+Simulating a news hit on EVERY tick (worst case), five markets, 66788
+samples:
+        before:  LOW 15.9%  ELEVATED 81.5%  HIGH  2.6%
+        after:   LOW 88.3%  ELEVATED 11.3%  HIGH  0.5%
+ELEVATED at 11.3% now tracks the measured displacement risk (10-11% in the
+1-4h pre-close window) instead of being a constant. CONFIRMED live after
+deploy: risk=LOW on calm markets with news=0 event=0, collector writing,
+no warnings, healthcheck exit 0.
+
+### ON RESETTING THE RUN
+This was the last KNOWN behaviour-affecting defect, so the run is now
+ready to reset. For the record, why it should not have been reset before:
+the data spans SIX behaviour-changing deploys since the 10-01 "official
+start" (phantom orderbook 10-02, dead-market detection and settlement
+10-04, quote sizing 10-04, reward density 10-05, displacement risk and
+these signal fixes 10-06). The longest behaviourally-consistent stretch
+was ~28 hours. Resetting before fixing the news/event defect would have
+started a 14-day clock on code that was widening every quote for no
+reason.
+
+Reset means declaring a measurement-start timestamp, NOT wiping the
+database -- same convention as the existing ts >= 1790836411 filter and
+CONTAMINATED_TICKERS. The 10-06 adverse-selection event is the single most
+valuable observation this project has produced and must survive.
+Continuity is otherwise good: exactly ONE gap over 5 minutes in the whole
+run (the 4.5h settled-market stall on 10-04).
+
+Accepted caveat: a bug has been found on every status check so far, so
+"wait for stability" could run forever. The bound is to reset now and
+record future changes in this file as they happen, rather than restarting
+the clock each time.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

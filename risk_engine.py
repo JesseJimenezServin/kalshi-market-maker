@@ -114,7 +114,12 @@ class RiskEngine:
         # News hits and event-proximity both carry no direction/confidence
         # -- they only ever nudge risk up one notch (toward ELEVATED), never
         # straight to HIGH on their own.
-        news_level = ELEVATED if self.news_signal else LOW
+        #
+        # news_signal is still computed and logged, but gated out of the
+        # composite by default: measured 2026-10-06, it fires 61.2% of the
+        # time and a hit makes a >= 8c move LESS likely than a random moment
+        # in every market tested. See config.NEWS_SIGNAL_AFFECTS_RISK.
+        news_level = ELEVATED if (self.news_signal and config.NEWS_SIGNAL_AFFECTS_RISK) else LOW
         event_level = ELEVATED if self.event_signal else LOW
         composite = _max_severity(_max_severity(self.volatility_level, self.inventory_level), news_level)
         self.risk_level = _max_severity(composite, event_level)

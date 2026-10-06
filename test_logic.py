@@ -611,30 +611,86 @@ def test_score_relevance_keyword_overlap():
     print("test_score_relevance_keyword_overlap: PASS")
 
 
-def test_risk_engine_news_signal_escalates_then_decays():
+def test_news_signal_is_tracked_and_decays_but_does_not_move_risk():
+    """
+    news_signal is still computed, logged and shown -- it just no longer
+    feeds risk_level.
+
+    Measured 2026-10-06: it fires 61.2% of the time, and P(>= 8c mid move
+    within 30 min) after a hit was LOWER than at a random moment in all six
+    markets tested (e.g. 11.7% vs 14.5%). It was not a warning, it was a
+    constant that pinned risk to ELEVATED and widened every quote -- which
+    costs reward score, because quoting away from the Reference Price
+    lowers the distance multiplier. See config.NEWS_SIGNAL_AFFECTS_RISK.
+    """
     engine = RiskEngine(ticker="TEST")
     inventory = InventoryState(ticker="TEST")
     t0 = 1_000_000.0
 
-    # Baseline: stable mid, flat inventory, no news yet -> stays LOW.
     engine.update(50.0, inventory, max_inventory=500, now=t0)
     assert engine.risk_level == LOW
     assert engine.news_signal is False
 
-    # A relevant news hit nudges risk up toward ELEVATED even though
-    # volatility/inventory alone would still say LOW.
+    # A hit is still TRACKED ...
     engine.register_news_event(now=t0)
     engine.update(50.0, inventory, max_inventory=500, now=t0 + 1)
     assert engine.news_signal is True
-    assert engine.risk_level == ELEVATED, engine.risk_level
+    # ... but no longer escalates risk on its own.
+    assert config.NEWS_SIGNAL_AFFECTS_RISK is False, "default expected to be off"
+    assert engine.risk_level == LOW, engine.risk_level
 
-    # After the configured decay window has elapsed, the signal expires
-    # and risk level falls back to LOW (inputs otherwise unchanged).
+    # The decay window still works, so re-enabling it needs no other change.
     decayed_ts = t0 + config.NEWS_SIGNAL_DECAY_MINUTES * 60 + 1
     engine.update(50.0, inventory, max_inventory=500, now=decayed_ts)
     assert engine.news_signal is False
+
+    # And when deliberately re-enabled, it escalates exactly as before.
+    original = config.NEWS_SIGNAL_AFFECTS_RISK
+    try:
+        config.NEWS_SIGNAL_AFFECTS_RISK = True
+        engine.register_news_event(now=decayed_ts)
+        engine.update(50.0, inventory, max_inventory=500, now=decayed_ts + 1)
+        assert engine.news_signal is True
+        assert engine.risk_level == ELEVATED, engine.risk_level
+    finally:
+        config.NEWS_SIGNAL_AFFECTS_RISK = original
+    print("test_news_signal_is_tracked_and_decays_but_does_not_move_risk: PASS")
+
+
+def test_event_proximity_window_excludes_the_quiet_far_field():
+    """
+    EVENT_CALENDAR_WARNING_HOURS was 48, wider than the entire 24h life of
+    the markets traded, so event_signal could never turn off -- 60.0% active
+    and, with news, responsible for 79.9% of all ELEVATED risk while
+    volatility and inventory were both LOW.
+
+    Calibrated against measured 300s displacement by hours-until-close:
+    1-2h 11.3% of snapshots >= 8c, 2-4h 10.7%, 4-8h 5.1%, 8-24h 0.4%,
+    24-48h 0.0%. The window must cover the former and exclude the latter.
+    """
+    assert config.EVENT_CALENDAR_WARNING_HOURS <= 4.0, config.EVENT_CALENDAR_WARNING_HOURS
+
+    engine = RiskEngine(ticker="TEST")
+    inventory = InventoryState(ticker="TEST")
+    t0 = 1_000_000.0
+
+    # far from close: the quiet region, must NOT flag
+    engine.set_event_proximity(12.0)
+    engine.update(50.0, inventory, max_inventory=500, now=t0)
+    assert engine.event_signal is False
     assert engine.risk_level == LOW, engine.risk_level
-    print("test_risk_engine_news_signal_escalates_then_decays: PASS")
+
+    # inside the high-displacement window: must flag
+    engine.set_event_proximity(2.0)
+    engine.update(50.0, inventory, max_inventory=500, now=t0 + 1)
+    assert engine.event_signal is True
+    assert engine.risk_level == ELEVATED, engine.risk_level
+
+    # already past close is settled, not risky (pre-existing behaviour)
+    engine.set_event_proximity(-1.0)
+    engine.update(50.0, inventory, max_inventory=500, now=t0 + 2)
+    assert engine.event_signal is False
+    print("test_event_proximity_window_excludes_the_quiet_far_field: PASS")
 
 
 def test_compute_crowding_ratio():
@@ -1588,7 +1644,8 @@ if __name__ == "__main__":
     test_compute_quote_applies_take_profit_floor_on_exit_side()
     test_classify_fill_exit_reason()
     test_score_relevance_keyword_overlap()
-    test_risk_engine_news_signal_escalates_then_decays()
+    test_news_signal_is_tracked_and_decays_but_does_not_move_risk()
+    test_event_proximity_window_excludes_the_quiet_far_field()
     test_compute_crowding_ratio()
     test_market_switcher_trigger_requires_sustain_and_cooldown()
     test_is_worthwhile_crowding_switch_requires_meaningful_improvement()

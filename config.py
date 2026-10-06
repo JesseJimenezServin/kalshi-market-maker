@@ -289,6 +289,29 @@ NEWS_RELEVANCE_THRESHOLD = 0.2
 # news_signal active before it decays back off.
 NEWS_SIGNAL_DECAY_MINUTES = 45
 
+# Whether news_signal feeds the composite risk_level at all.
+#
+# FALSE as of 2026-10-06, because it was measured to have NO predictive
+# value for the risk it was supposed to warn about. P(mid displacement
+# >= 8c within 30 min) after a news hit vs at a random time, per market:
+#       OCT06-E38.5   11.7%  vs  14.5%
+#       OCT06-E38.4    5.2%  vs   7.5%
+#       OCT06-E38.6    3.1%  vs   4.1%
+#       OCT05-E38.2    0.0%  vs   0.0%
+#       OCT05-E38.4    0.0%  vs   0.0%
+#       OCT04-E38.1   18.4%  vs  20.8%
+# A news hit made a move LESS likely than a coin-flip moment, in every
+# single market. Combined with firing 61.2% of the time, it was not a
+# warning -- it was a constant that pinned risk_level to ELEVATED and
+# widened every quote for nothing.
+#
+# news_events collection and the news_signal field are DELIBERATELY KEPT:
+# the raw articles are research material for a better relevance heuristic
+# later, and the dashboard still shows the flag. Only its effect on
+# risk_level is removed. Re-enable once relevance is selective enough to
+# beat the baseline above.
+NEWS_SIGNAL_AFFECTS_RISK = False
+
 # --------------------------------------------------------------------------
 # Event-triggered market switcher (opt-in, off by default)
 # --------------------------------------------------------------------------
@@ -378,7 +401,30 @@ EVENT_CALENDAR_POLL_INTERVAL_SEC = 3600  # 1 hour
 # already PAST close_time (negative hours) is NOT flagged -- it's settled
 # or near-settled, which is safe, not risky (matches the existing
 # KXEOWEEK "likely near-settled" thesis in WATCHED_MARKET_TICKERS above).
-EVENT_CALENDAR_WARNING_HOURS = 48
+# Calibrated 2026-10-06 against real displacement, after discovering this
+# signal was active 60.0% of the time and (with news) responsible for 79.9%
+# of all ELEVATED risk while volatility and inventory were both LOW.
+#
+# The cause was that 48h is WIDER THAN THE ENTIRE LIFE of the markets being
+# traded: the Trump approval contracts run on a 24-hour cycle, so every
+# snapshot was inside the window and the signal could never turn off. An
+# always-on risk input is indistinguishable from no input -- except that
+# ELEVATED widens the quote by WIDEN_TICKS_ELEVATED, so it was quietly
+# costing reward score (quoting away from the Reference Price lowers the
+# distance multiplier) for no risk information in return.
+#
+# Measured: 300s mid displacement, bucketed by hours-until-close, across six
+# markets:
+#       0-1h    0.0% of snapshots >= 8c   (book already emptying out)
+#       1-2h   11.3%
+#       2-4h   10.7%
+#       4-8h    5.1%
+#       8-24h   0.4%
+#       24-48h  0.0%
+# Risk is concentrated in the 1-4h window. 4h keeps both high-risk buckets
+# plus margin and excludes the 8-48h region that caused the always-on
+# behaviour.
+EVENT_CALENDAR_WARNING_HOURS = 4.0
 
 # --------------------------------------------------------------------------
 # Crowding-aware market screening (opt-in; used by incentive_screener.py's
