@@ -1858,6 +1858,60 @@ Accepted caveat: a bug has been found on every status check so far, so
 record future changes in this file as they happen, rather than restarting
 the clock each time.
 
+## 2026-10-07: reset DEFERRED ~2 days by decision; what to watch meanwhile
+
+Decision (user, 2026-10-07): let the run continue roughly two more days
+before declaring the measurement-start timestamp.
+
+Rationale, and it is better than resetting immediately: the 10-06 risk
+calibration (displacement term, event window 48h -> 4h, news gated out of
+the composite) has only a couple of hours of live data behind it. Waiting
+means the window starts on code that has been OBSERVED to behave, not just
+tested and projected. It also finally produces the first
+behaviourally-consistent multi-day stretch this project has had -- the
+previous best was ~28 hours.
+
+### Falsifiable predictions from the 10-06 changes
+Stated now so the wait produces an ANSWER rather than just elapsed time.
+If these do not hold, the calibration is wrong and the reset should wait
+further:
+  1. risk_level ELEVATED settles near ~11% of snapshots, not ~81%.
+     Projection was LOW 88.3% / ELEVATED 11.3% / HIGH 0.5%.
+  2. displacement HIGH fires only on genuine repricings. It fired on 1.4%
+     of the event market's snapshots and 0.0% on four calm markets; a
+     materially higher rate in live trading means the 15c threshold is too
+     tight.
+  3. combined_score per snapshot RISES relative to the pre-10-06 baseline.
+     This is the one that matters commercially: ELEVATED was widening every
+     quote by WIDEN_TICKS_ELEVATED 81.5% of the time, and quoting away from
+     the Reference Price lowers the reward distance multiplier. Removing an
+     uninformative permanent widening should show up as more reward capture.
+     Pre-fix baseline for comparison: mean combined_score 0.02767 (10-05
+     post-density-fix window) and 0.0428 on the best market.
+
+### Disk: fine for the wait, TIGHT for the full window after it
+Measured 10-07: 23% used, live DB 1.86GB, on-box backups 606MB, growth
+~363-390MB/day (gz deltas 27.6MB/24h).
+    day +2   10-08 (reset)   steady  2.98GB   peak-during-backup  5.62GB
+    day +9   10-15           steady  6.48GB   peak-during-backup 11.86GB
+    day +16  10-22 (+14d)    steady  9.99GB   peak-during-backup 18.11GB of 20GB
+The two-day wait is comfortable. A FULL 14-day window after the reset is
+not: ~1.9GB of headroom at peak, inside the error bars of a linear growth
+estimate.
+
+The peak is driven by shape, not volume: both backup_db.py and
+push_offbox_backup.sh write a FULL UNCOMPRESSED copy (live-DB-sized) before
+gzipping it, so peak ~= 2x live + retained backups. Options, in rough order
+of leverage, NONE yet done:
+  - stream the snapshot through gzip instead of writing raw-then-compress,
+    which removes a whole live-DB-sized temp from the peak;
+  - KEEP_LAST 5 -> 3 (~1.1GB at that size, modest);
+  - reduce orderbook_snapshots sampling rate (changes the data, so a
+    measurement decision rather than an ops one);
+  - resize the Droplet volume (costs money, user's call).
+Not urgent today and deliberately not bundled into the reset, but it must
+be settled BEFORE committing to a 14-day window ending ~10-22.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
