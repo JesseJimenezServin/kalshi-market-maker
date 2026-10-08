@@ -43,6 +43,10 @@ class RiskEngine:
     # move that unfolds over minutes, which a fixed sample count cannot
     # bound reliably when the tick cadence varies.
     _mid_history: deque = field(default_factory=deque, repr=False)
+    # Set when displacement crosses HIGH; keeps HIGH latched until then.
+    # See config.DISPLACEMENT_HIGH_HOLD_SECONDS -- without it HIGH lasted
+    # exactly one window and expired mid-trend.
+    _displacement_high_until: float | None = field(default=None, repr=False)
     _news_active_until: float | None = field(default=None, repr=False)
     news_signal: bool = False
     event_signal: bool = False
@@ -108,7 +112,7 @@ class RiskEngine:
         # existing consumers (quoting_policy, the dashboard badge) react to
         # either without change. The two terms are also exposed separately.
         stdev_level = self._volatility_level()
-        self.displacement_cents, self.displacement_level = self._displacement()
+        self.displacement_cents, self.displacement_level = self._displacement(now)
         self.volatility_level = _max_severity(stdev_level, self.displacement_level)
         self.inventory_level = self._inventory_level(inventory, max_inventory)
         # News hits and event-proximity both carry no direction/confidence
@@ -124,7 +128,7 @@ class RiskEngine:
         composite = _max_severity(_max_severity(self.volatility_level, self.inventory_level), news_level)
         self.risk_level = _max_severity(composite, event_level)
 
-    def _displacement(self) -> tuple[float, str]:
+    def _displacement(self, now: float) -> tuple[float, str]:
         """
         Peak-to-trough range of the mid over the trailing window, in cents,
         and the risk level it implies.
@@ -138,8 +142,20 @@ class RiskEngine:
             return 0.0, LOW
         mids = [m for _, m in self._mid_history]
         spread = max(mids) - min(mids)
+
         if spread >= config.DISPLACEMENT_HIGH_THRESHOLD:
+            # Latch. A market that just travelled this far stays dangerous
+            # for longer than the measurement window, and the window itself
+            # goes blind to a sustained trend once the move scrolls out of
+            # it. Re-triggering extends the hold rather than resetting it.
+            self._displacement_high_until = now + config.DISPLACEMENT_HIGH_HOLD_SECONDS
             return spread, HIGH
+
+        if self._displacement_high_until is not None:
+            if now < self._displacement_high_until:
+                return spread, HIGH
+            self._displacement_high_until = None
+
         if spread >= config.DISPLACEMENT_ELEVATED_THRESHOLD:
             return spread, ELEVATED
         return spread, LOW

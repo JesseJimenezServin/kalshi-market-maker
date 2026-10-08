@@ -1332,16 +1332,62 @@ def test_displacement_stays_low_on_a_calm_market_and_ages_out():
     assert eng.displacement_cents <= 2.0
 
     # a genuine jump escalates ...
+    trigger_at = t0 + 600
     for i in range(10):
-        eng.update(70.0, inv, max_inventory=333, now=t0 + 600 + i)
+        eng.update(70.0, inv, max_inventory=333, now=trigger_at + i)
     assert eng.displacement_level == HIGH, eng.displacement_cents
 
-    # ... and then ages out of the trailing window once it is history
-    later = t0 + 600 + config.DISPLACEMENT_WINDOW_SECONDS + 60
+    # ... and STAYS high after the move scrolls out of the measurement
+    # window, which is the whole point of the latch: without it HIGH
+    # expired after exactly one window while the price was still moving
+    # (2026-10-07, -$69 on KXTRUMPAPPROVE-26OCT07-E38.5).
+    still_held = trigger_at + config.DISPLACEMENT_WINDOW_SECONDS + 60
+    assert still_held < trigger_at + config.DISPLACEMENT_HIGH_HOLD_SECONDS
     for i in range(10):
-        eng.update(70.0, inv, max_inventory=333, now=later + i)
+        eng.update(70.0, inv, max_inventory=333, now=still_held + i)
+    assert eng.displacement_cents <= 2.0, "the measured range HAS decayed"
+    assert eng.displacement_level == HIGH, "but HIGH must still be latched"
+
+    # ... and only releases once the hold period has elapsed
+    released = trigger_at + config.DISPLACEMENT_HIGH_HOLD_SECONDS + 60
+    for i in range(10):
+        eng.update(70.0, inv, max_inventory=333, now=released + i)
     assert eng.displacement_level == LOW, (eng.displacement_level, eng.displacement_cents)
     print("test_displacement_stays_low_on_a_calm_market_and_ages_out: PASS")
+
+
+def test_displacement_high_hold_extends_on_retrigger():
+    """
+    A move that keeps going must extend the hold, not run it down. Each new
+    HIGH reading restarts the clock.
+    """
+    eng = RiskEngine(ticker="TREND")
+    inv = InventoryState(ticker="TREND")
+    t0 = 1_000_000.0
+    for i in range(10):
+        eng.update(10.0, inv, max_inventory=333, now=t0 + i)
+    for i in range(10):
+        eng.update(40.0, inv, max_inventory=333, now=t0 + 10 + i)
+    assert eng.displacement_level == HIGH
+
+    # Re-trigger near the end of the first hold. A real re-trigger needs a
+    # RANGE inside the window, so establish a baseline first and then jump
+    # -- simply arriving at a new level is not a move the measure can see,
+    # which is the same reason the latch is needed at all.
+    late = t0 + config.DISPLACEMENT_HIGH_HOLD_SECONDS - 120
+    for i in range(10):
+        eng.update(40.0, inv, max_inventory=333, now=late + i)
+    for i in range(10):
+        eng.update(90.0, inv, max_inventory=333, now=late + 10 + i)
+    assert eng.displacement_level == HIGH
+    assert eng.displacement_cents >= config.DISPLACEMENT_HIGH_THRESHOLD
+
+    # the original hold has now expired, but the re-trigger carries it on
+    past_first = t0 + config.DISPLACEMENT_HIGH_HOLD_SECONDS + 120
+    for i in range(5):
+        eng.update(90.0, inv, max_inventory=333, now=past_first + i)
+    assert eng.displacement_level == HIGH, "re-trigger must extend, not reset"
+    print("test_displacement_high_hold_extends_on_retrigger: PASS")
 
 
 def test_displacement_needs_a_few_samples_before_reporting():
@@ -1681,6 +1727,7 @@ if __name__ == "__main__":
     test_empty_book_reads_as_uncrowded_which_is_why_liveness_is_separate()
     test_smooth_large_move_escalates_risk_even_though_stdev_stays_low()
     test_displacement_stays_low_on_a_calm_market_and_ages_out()
+    test_displacement_high_hold_extends_on_retrigger()
     test_displacement_needs_a_few_samples_before_reporting()
     test_risk_engine_exposes_sub_level_breakdown()
     test_risk_reason_attributes_only_the_actual_driving_factor()

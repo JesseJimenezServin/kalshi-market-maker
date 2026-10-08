@@ -200,6 +200,40 @@ DISPLACEMENT_WINDOW_SECONDS = 300.0
 DISPLACEMENT_ELEVATED_THRESHOLD = 8.0
 DISPLACEMENT_HIGH_THRESHOLD = 15.0
 
+# Once displacement triggers HIGH, hold HIGH for at least this long.
+#
+# Without the hold, HIGH lasted EXACTLY one window and then reset, because
+# a rolling range cannot see a sustained trend: the big move scrolls out of
+# the 300s window and each later slice contains only the incremental step.
+# Measured 2026-10-07 on KXTRUMPAPPROVE-26OCT07-E38.5: 10990 snapshots,
+# 2 HIGH episodes, both exactly 303s long. The mid fell 59c -> 6c; HIGH
+# fired correctly near the start (P&L +$0.78), expired 303s later while the
+# price was still collapsing, the quote came back on, and the position was
+# adversely filled down to -$75.73. The signal was timely and still
+# protected nothing.
+#
+# Calibrated on how far the mid travels AFTER a trigger:
+#       market            +5m   +10m  +15m  +30m  +60m
+#       OCT06-E38.5      27.0  28.0  28.2  28.2  28.2
+#       OCT07-E38.5       4.5   4.5   5.0  39.5  39.5   <- the $69 loss
+#       NCAAFDELAY        6.2   6.5   6.8   7.0  10.5
+#       OCT07-E38.4      53.0  53.0  53.0  53.0  53.0
+# Most danger lands within 5-15 min, but OCT07-E38.5 -- the market this
+# fix exists for -- did most of its damage at the 30 MINUTE mark. A 15-min
+# hold would have missed it.
+#
+# Cost, as % of snapshots with the quote pulled:
+#       calm markets (4):  0.0% at EVERY hold duration
+#       event markets:     5.6% / 6.4% / 15.3% / 0.2% at 30m
+#                          7.8% / 9.7% / 28.4% / 0.2% at 60m
+# 30 min is free on quiet markets and costs 6-15% of quoting time on ones
+# that genuinely moved -- where quoting is what loses the money. 60 min
+# roughly doubles the cost for almost no extra coverage.
+#
+# Only HIGH latches. ELEVATED merely widens rather than pulling, so it is
+# left instantaneous.
+DISPLACEMENT_HIGH_HOLD_SECONDS = 1800.0
+
 # Thresholds on abs(net_yes_contracts) / max_inventory that escalate risk level.
 INVENTORY_FRACTION_ELEVATED_THRESHOLD = 0.4
 INVENTORY_FRACTION_HIGH_THRESHOLD = 0.7

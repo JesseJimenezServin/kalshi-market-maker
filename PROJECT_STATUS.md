@@ -1912,6 +1912,76 @@ of leverage, NONE yet done:
 Not urgent today and deliberately not bundled into the reset, but it must
 be settled BEFORE committing to a 14-day window ending ~10-22.
 
+## 2026-10-08: predictions confirmed; HIGH now latches; P&L still negative
+
+### The three 10-06 predictions all held
+  1. ELEVATED settles near ~11%  -> ACTUAL LOW 96.6% / ELEV 2.7% / HIGH 0.8%
+     (better than the 88.3/11.3/0.5 projection). Gating verified: of 8409
+     elevated snapshots, volatility (2482) and event proximity (5925)
+     account for essentially all; news contributes nothing.
+  2. displacement HIGH stays rare -> 0.8%, firing on genuine repricings.
+  3. combined_score RISES -> 0.02454 -> 0.06938, +182.7%.
+CAVEAT on (3): causation NOT established. The watched markets also changed
+between the two windows, and a query joining quotes to scores on exact
+timestamps returned nothing, so the "quote now sits at the Reference
+Price" mechanism is unverified. Direction and magnitude are consistent
+with removing a permanent 2-tick widening, but it is association.
+
+### But the losses continued, and the reason was structural
+Balance $755.39, P&L -$244.61, down ~$105 in 24h on two markets
+(-$69.34 and -$63.29). The displacement term fired ON TIME in both cases
+-- P&L was +$0.78 and $0.00 at the first HIGH -- and the whole loss landed
+afterwards anyway.
+
+Cause: HIGH lasted EXACTLY one window and reset. On
+KXTRUMPAPPROVE-26OCT07-E38.5: 10990 snapshots, 2 HIGH episodes, both
+exactly 303s. The mid fell 59c -> 6c; HIGH fired near the start, expired
+303s later while the price was still collapsing, the quote came back on,
+and the position was filled down to -$75.73. A rolling range cannot see a
+sustained trend -- once the move scrolls out of the window, each later
+slice holds only the incremental step. Same blind spot as the original
+stdev measure, one level up.
+
+### Fix: latch HIGH for 30 minutes
+Calibrated on how far the mid travels AFTER a trigger:
+       market          +5m   +10m  +15m  +30m  +60m
+       OCT06-E38.5    27.0  28.0  28.2  28.2  28.2
+       OCT07-E38.5     4.5   4.5   5.0  39.5  39.5   <- the $69 loss
+       NCAAFDELAY      6.2   6.5   6.8   7.0  10.5
+       OCT07-E38.4    53.0  53.0  53.0  53.0  53.0
+Most danger lands in 5-15 min, but OCT07-E38.5 did most of its damage at
+the 30 MINUTE mark, so a 15-min hold would have missed the market this fix
+exists for. Cost, as % of snapshots with the quote pulled: 0.0% on all four
+calm markets at EVERY duration; 5.6-15.3% at 30m on markets that moved.
+60m roughly doubles that for almost no extra coverage. Re-triggering
+extends the hold rather than resetting it. Only HIGH latches -- ELEVATED
+merely widens, so it stays instantaneous.
+
+### Replayed against the real losses -- honest, mixed result
+       market          HIGH%  episodes  longest   loss covered while HIGH
+       OCT07-E38.5      6.4%     1       3524s         74.9%
+       OCT06-E38.5      5.6%     2       2290s         30.9%
+       NCAAFDELAY      15.2%     2       2091s          0.0%
+       3 calm markets   0.0%     0          0s           n/a
+Strong on the extended move it was built for, partial on the original
+incident, and USELESS on NCAAFDELAY -- which collapsed 62c -> 27.5c in
+under 29 minutes, booking $49.52 in a single window. That is the
+irreducible limit stated when the term was added: no backward-looking
+measure can precede a gap. Worth recording as a measured fact rather than
+a caveat.
+
+Zero cost on calm markets at every tested duration, which is what makes
+the hold affordable: a pulled quote earns no reward, and reward is the
+revenue.
+
+### Where this leaves the run
+Trading P&L is -$244.61 against $14,648 of estimated reward income. The
+reward figure remains the UPPER BOUND (no competitive response modelled),
+so the honest read is unchanged: a real and growing measured cost against
+an unreliable revenue estimate. The adverse-selection cost is now the
+best-measured quantity in the project, which is itself the point of
+Phase 0.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
