@@ -22,6 +22,7 @@ network request.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import config
@@ -29,6 +30,8 @@ from adverse_selection_sim import HypotheticalQuote, InventoryState
 from orderbook import MarketBook
 from reward_simulator import compute_reference_price
 from risk_engine import ELEVATED, HIGH
+
+logger = logging.getLogger(__name__)
 
 
 def _clamp_price(price: int) -> int:
@@ -256,6 +259,32 @@ def compute_quote(
     )
 
 
+def _walk_book(levels_desc: list[tuple[int, float]], size: int) -> tuple[float, int] | None:
+    """
+    Average price and actually-fillable size for taking `size` contracts
+    against `levels_desc` (best price first).
+
+    The old code took the whole position at the BEST price regardless of how
+    much was resting there -- a 404-contract exit assumed the top of book
+    absorbed all 404. Walking the levels gives the real average, which is
+    what the slippage bound in flatten_position is then checked against.
+    Returns None if the book is empty.
+    """
+    filled = 0
+    cost = 0.0
+    for price, avail in levels_desc:
+        take = min(size - filled, int(avail))
+        if take <= 0:
+            continue
+        cost += price * take
+        filled += take
+        if filled >= size:
+            break
+    if filled <= 0:
+        return None
+    return cost / filled, filled
+
+
 def flatten_position(
     book: MarketBook,
     inventory: InventoryState,
@@ -278,27 +307,54 @@ def flatten_position(
     if net == 0:
         return None
 
+    best_yes = book.best_yes_bid()
+    best_no = book.best_no_bid()
+    if best_yes is None or best_no is None:
+        return None
+    mid = (best_yes[0] + (100 - best_no[0])) / 2.0
+
     if net > 0:
-        # Long yes -> sell yes as taker, i.e. hit the best resting YES bid.
-        best_yes = book.best_yes_bid()
-        if best_yes is None:
+        # Long yes -> sell yes as taker, walking DOWN the resting YES bids.
+        walk = _walk_book(book.yes_side_sorted_desc(), net)
+        if walk is None:
             return None
-        cross_price = best_yes[0]
-        size = net
-        applied = inventory.apply_no_fill(no_price=100 - cross_price, size=size, max_inventory=max_inventory)
-        side = "no"  # the fill is booked as a NO buy (equiv. selling YES)
-        price = 100 - cross_price
+        avg_yes_price, fillable = walk
     else:
-        # Short yes / long no -> buy yes as taker, i.e. hit the implied
-        # yes-ask, which is 100 - best resting NO bid price.
-        best_no = book.best_no_bid()
-        if best_no is None:
+        # Short yes / long no -> buy yes as taker, walking the NO bids,
+        # whose yes-equivalent price is 100 - no_price.
+        walk = _walk_book(book.no_side_sorted_desc(), abs(net))
+        if walk is None:
             return None
-        cross_price = 100 - best_no[0]
-        size = abs(net)
-        applied = inventory.apply_yes_fill(price=cross_price, size=size, max_inventory=max_inventory)
+        avg_no_price, fillable = walk
+        avg_yes_price = 100 - avg_no_price
+
+    # Price bound. Crossing used to happen at whatever was resting, which on
+    # a thin book meant dumping hundreds of contracts into a 1-cent bid --
+    # see config.MAX_FLATTEN_SLIPPAGE_CENTS for the measured damage.
+    slippage = abs(avg_yes_price - mid)
+    if slippage > config.MAX_FLATTEN_SLIPPAGE_CENTS:
+        logger.warning(
+            "%s: REFUSING to flatten %d contracts -- crossing costs %.1fc of slippage "
+            "(avg exit %.1fc vs mid %.1fc, limit %.1fc). Holding instead; the quote is "
+            "already pulled at HIGH so the position cannot grow, and settlement will "
+            "resolve it at its true value.",
+            inventory.ticker, abs(net), slippage, avg_yes_price, mid,
+            config.MAX_FLATTEN_SLIPPAGE_CENTS,
+        )
+        return None
+
+    if net > 0:
+        applied = inventory.apply_no_fill(
+            no_price=round(100 - avg_yes_price), size=fillable, max_inventory=max_inventory
+        )
+        side = "no"  # the fill is booked as a NO buy (equiv. selling YES)
+        price = round(100 - avg_yes_price)
+    else:
+        applied = inventory.apply_yes_fill(
+            price=round(avg_yes_price), size=fillable, max_inventory=max_inventory
+        )
         side = "yes"
-        price = cross_price
+        price = round(avg_yes_price)
 
     if applied <= 0:
         return None

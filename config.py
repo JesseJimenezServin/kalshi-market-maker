@@ -232,6 +232,20 @@ DISPLACEMENT_HIGH_THRESHOLD = 15.0
 #
 # Only HIGH latches. ELEVATED merely widens rather than pulling, so it is
 # left instantaneous.
+# RE-ENABLED 2026-10-09 once flatten_position gained a slippage bound.
+#
+# Briefly set to 0 after the latch tripled exposure to a pre-existing
+# defect: HIGH both pulls the quote AND arms hard_stop_flatten, which
+# crossed the spread at ANY price. Holding HIGH ~6x longer took the
+# forced-flatten rate from 0.15/h to 0.45/h and the average exit price from
+# 54.7c to 86.1c -- 322-404 contract positions dumped into a 1-cent bid.
+# P&L went -$244 -> -$707 in 28.6h.
+#
+# The latch was never the defect; it was correct behaviour sitting on top
+# of a broken exit path. With MAX_FLATTEN_SLIPPAGE_CENTS in place the
+# ruinous exits are refused, so the latch can do its job: keep the quote
+# out of a trending market without the exit path turning that into a
+# realised loss.
 DISPLACEMENT_HIGH_HOLD_SECONDS = 1800.0
 
 # Thresholds on abs(net_yes_contracts) / max_inventory that escalate risk level.
@@ -241,6 +255,28 @@ INVENTORY_FRACTION_HIGH_THRESHOLD = 0.7
 # At HIGH risk, if our inventory fraction is at/above this, actively flatten
 # (cross the spread) instead of just pulling the quote.
 HARD_STOP_INVENTORY_FRACTION = 0.8
+
+# Maximum slippage (cents away from the mid) we will pay to cross out of a
+# position. Beyond this, flatten_position REFUSES and the position is held.
+#
+# Added 2026-10-09 after forced exits did more damage than the moves they
+# were protecting against. flatten_position crossed at whatever the best
+# resting bid happened to be, with no price bound at all, so on a thin book
+# it dumped 322-404 contracts into a 1-cent bid. Measured over 44 historical
+# flattens, slippage vs the mid at that moment:
+#       p50  2.5c    p75  6.0c    p90 26.5c    max 51.5c    mean 7.2c
+# There is a clean break: everything is <= 7.5c or >= 10c, and the tail runs
+# 15c, 25c, 26.5c, 26.5c, 39.5c, 41c, 51.5c. 10c keeps every normal exit
+# (p75 is 6c) and blocks exactly that tail -- 6 of 44 flattens, the ones
+# that cost real money.
+#
+# Refusing is safe BECAUSE of two other properties: the hard stop only fires
+# at HIGH risk, where compute_quote already returns None, so a held position
+# cannot grow; and settlement accounting (added 10-04) now resolves a held
+# position at its true 0/100 outcome rather than freezing a stale mark.
+# Paying 51c of spread to avoid a contract that can only move 8c further is
+# not risk management.
+MAX_FLATTEN_SLIPPAGE_CENTS = 10.0
 
 # Quote widening (in cents/ticks off best bid, after inventory skew is
 # applied) when risk_level == ELEVATED.

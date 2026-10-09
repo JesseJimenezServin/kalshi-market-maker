@@ -1982,6 +1982,71 @@ an unreliable revenue estimate. The adverse-selection cost is now the
 best-measured quantity in the project, which is itself the point of
 Phase 0.
 
+## 2026-10-09 INCIDENT: my latch tripled exposure to a ruinous exit path
+
+Balance $755.39 -> $292.85, P&L -$707.15, a $462 loss in 28.6h. The
+proximate cause was a change I made.
+
+### What happened
+The 10-08 latch worked exactly as designed -- HIGH episodes went from a
+hard 303s cap to 2098s/3951s. But HIGH does TWO things and I only reasoned
+about one: it pulls the quote AND it arms hard_stop_flatten, which crossed
+the spread UNCONDITIONALLY, at whatever price happened to be resting.
+Holding HIGH ~6x longer exposed that path ~3x more often:
+        forced-flatten rate   0.15/h -> 0.45/h
+        average exit price    54.7c  -> 86.1c
+        exits at >= 95c       838    -> 1586 contracts
+Those are 322-404 contract positions sold into a 1-cent bid. Three markets
+ended flat with large REALISED losses (-$174.47, -$139.74, -$114.48).
+
+I got the diagnosis right and the consequence wrong. The latch was never
+the defect -- it is correct behaviour sitting on top of a broken exit path
+that predates it (99c exits appear in the data before 10-08 too). What I
+failed to do was ask what ELSE the HIGH state triggers.
+
+### Step 1: stopped the bleeding immediately
+DISPLACEMENT_HIGH_HOLD_SECONDS -> 0, which makes the hold expire the
+instant it is set and reproduces pre-latch behaviour exactly, without
+reverting any file. Verified by unit check before deploying.
+
+### Step 2: fixed the exit path, two defects
+(a) NO PRICE BOUND. flatten_position crossed at any price.
+MAX_FLATTEN_SLIPPAGE_CENTS = 10.0 now refuses beyond that. Calibrated on
+44 historical flattens: slippage p50 2.5c, p75 6.0c, p90 26.5c, max 51.5c,
+with a clean break -- everything is <= 7.5c or >= 15c. 10c keeps every
+normal exit and blocks exactly the tail.
+Replayed over all 44: 37 kept, 7 REFUSED, and those 7 carried $722.20 of
+slippage -- essentially the entire $707 loss. (That is the cost realised BY
+crossing. Holding is not free either; it caps the position at its own
+settlement value, which is bounded and now correctly accounted.)
+
+(b) NO DEPTH CHECK. flatten_position took the WHOLE position at the best
+price regardless of resting size -- a 404-contract exit assumed the touch
+absorbed all 404. It now walks the levels via _walk_book() for a true
+average and a true fillable size, with the remainder left on the book. A
+test had encoded the fantasy directly: 200 contracts resting, a
+420-contract exit asserted at the top price.
+
+Refusing is safe because of two properties that did not exist earlier in
+the run: the hard stop only fires at HIGH, where compute_quote already
+returns None so a held position cannot grow; and settlement accounting
+(10-04) resolves a held position at its true 0/100 outcome instead of
+freezing a stale mark.
+
+### What I did NOT do, and why
+The plan said "don't hard-stop while the quote is already pulled". Taken
+literally that deletes the hard stop: it only fires at HIGH, and HIGH
+always pulls the quote, so the condition is always true. That would remove
+tail protection entirely. The slippage bound achieves the actual intent --
+stop ruinous forced exits -- while keeping the stop available when the book
+can absorb the position at a sane price.
+
+### Latch re-enabled
+Back to 1800.0 now the exit path is bounded. Two changes at once is exactly
+the mistake that caused this incident, so this one wants watching: the
+specific thing to check is whether HIGH episodes now coincide with REFUSED
+flattens in the log rather than 90c+ crossings.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No

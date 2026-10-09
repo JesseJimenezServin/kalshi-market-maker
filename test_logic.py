@@ -420,9 +420,75 @@ def test_risk_engine_escalates_to_high_on_volatile_mid():
     print("test_risk_engine_escalates_to_high_on_volatile_mid: PASS")
 
 
+def test_flatten_refuses_to_cross_at_a_ruinous_price():
+    """
+    THE 2026-10-09 LOSS. flatten_position crossed at whatever was resting,
+    with no price bound, so on a thin book it dumped 322-404 contracts into
+    a 1-cent bid. Measured: forced-exit slippage p50 2.5c, p75 6.0c, but a
+    tail of 25c / 26.5c / 39.5c / 41c / 51.5c. P&L -$244 -> -$707 in 28.6h.
+    """
+    # Mid is 50c, but the only resting YES bid is 1c -- crossing means
+    # selling 300 contracts at 1c, 49c of slippage.
+    book = MarketBook(ticker="THIN")
+    book.apply_snapshot(sid=1, seq=1, yes=[[1, 5000]], no=[[1, 5000]])
+    inv = InventoryState(ticker="THIN", net_yes_contracts=300, avg_entry_price=45.0)
+
+    best_yes, best_no = book.best_yes_bid(), book.best_no_bid()
+    mid = (best_yes[0] + (100 - best_no[0])) / 2.0
+    assert mid == 50.0, mid
+    assert abs(1 - mid) > config.MAX_FLATTEN_SLIPPAGE_CENTS
+
+    fill = quoting_policy.flatten_position(book, inv, max_inventory=500, reason="hard_stop_flatten")
+    assert fill is None, "must refuse rather than realise a 49c loss"
+    assert inv.net_yes_contracts == 300, "position must be held intact"
+    assert inv.realized_pnl_cents == 0.0, "nothing realised"
+
+    # A normal, tight book still flattens.
+    ok = MarketBook(ticker="TIGHT")
+    ok.apply_snapshot(sid=1, seq=1, yes=[[49, 5000]], no=[[49, 5000]])
+    inv2 = InventoryState(ticker="TIGHT", net_yes_contracts=300, avg_entry_price=45.0)
+    fill2 = quoting_policy.flatten_position(ok, inv2, max_inventory=500, reason="hard_stop_flatten")
+    assert fill2 is not None, "a 1c-slippage exit must still be allowed"
+    assert inv2.net_yes_contracts == 0
+    print("test_flatten_refuses_to_cross_at_a_ruinous_price: PASS")
+
+
+def test_flatten_walks_the_book_instead_of_assuming_infinite_top_of_book():
+    """
+    The old code took the ENTIRE position at the best price regardless of
+    resting size -- a 404-contract exit assumed the touch absorbed all 404.
+    Walking the levels gives the true average, which is what the slippage
+    bound is then judged against.
+    """
+    book = MarketBook(ticker="LADDER")
+    # 100 @ 50, 100 @ 48, 200 @ 46 on the YES side; NO side tight so mid=50
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 100], [48, 100], [46, 200]], no=[[50, 5000]])
+    inv = InventoryState(ticker="LADDER", net_yes_contracts=200, avg_entry_price=45.0)
+
+    fill = quoting_policy.flatten_position(book, inv, max_inventory=500, reason="hard_stop_flatten")
+    assert fill is not None
+    # 100@50 + 100@48 -> average 49c, NOT the 50c top of book
+    assert fill["price"] == 100 - 49, fill["price"]
+    assert fill["size"] == 200
+
+    # And a position larger than the whole book fills only what is there.
+    book2 = MarketBook(ticker="SHALLOW")
+    book2.apply_snapshot(sid=1, seq=1, yes=[[50, 120]], no=[[50, 5000]])
+    inv2 = InventoryState(ticker="SHALLOW", net_yes_contracts=400, avg_entry_price=45.0)
+    fill2 = quoting_policy.flatten_position(book2, inv2, max_inventory=500, reason="hard_stop_flatten")
+    assert fill2 is not None
+    assert fill2["size"] == 120, fill2["size"]
+    assert inv2.net_yes_contracts == 280, "the unfillable remainder stays on the book"
+    print("test_flatten_walks_the_book_instead_of_assuming_infinite_top_of_book: PASS")
+
+
 def test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise():
+    # Deep book so the whole position is genuinely fillable near the touch.
+    # This test used to rest only 200 contracts and still assert a
+    # 420-contract exit at the best price -- the exact fantasy that let
+    # flatten_position dump 404 contracts into a 1-cent bid in production.
     book = MarketBook(ticker="TEST")
-    book.apply_snapshot(sid=1, seq=1, yes=[[50, 200]], no=[[48, 200]])
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 500]], no=[[48, 500]])
 
     # Long yes at/above the hard-stop fraction, risk HIGH -> should fire.
     inv = InventoryState(ticker="TEST", net_yes_contracts=420, avg_entry_price=45.0)
@@ -456,7 +522,7 @@ def test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations():
     # max(120, order_size + min_buffer) = max(120, 100+50=150) = 150 --
     # must NOT fire at 120, only once inventory actually reaches 150.
     book = MarketBook(ticker="TEST")
-    book.apply_snapshot(sid=1, seq=1, yes=[[50, 200]], no=[[48, 200]])
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 500]], no=[[48, 500]])
 
     inv = InventoryState(ticker="TEST", net_yes_contracts=120, avg_entry_price=45.0)
     assert maybe_execute_stop_loss(
@@ -1325,6 +1391,20 @@ def test_displacement_stays_low_on_a_calm_market_and_ages_out():
     inv = InventoryState(ticker="CALM")
     t0 = 1_000_000.0
 
+    # Pin the hold: this asserts the latch MECHANISM, which must keep
+    # working whatever the operational value happens to be. It is currently
+    # 0 (disabled) while flatten_position's slippage bound is proven out --
+    # see config.DISPLACEMENT_HIGH_HOLD_SECONDS.
+    _orig_hold = config.DISPLACEMENT_HIGH_HOLD_SECONDS
+    config.DISPLACEMENT_HIGH_HOLD_SECONDS = 1800.0
+    try:
+        _run_calm_market_latch_checks(eng, inv, t0)
+    finally:
+        config.DISPLACEMENT_HIGH_HOLD_SECONDS = _orig_hold
+    print("test_displacement_stays_low_on_a_calm_market_and_ages_out: PASS")
+
+
+def _run_calm_market_latch_checks(eng, inv, t0):
     # 1c of wobble for 10 minutes -> never escalates
     for i in range(600):
         eng.update(50.0 + (i % 2), inv, max_inventory=333, now=t0 + i)
@@ -1353,7 +1433,6 @@ def test_displacement_stays_low_on_a_calm_market_and_ages_out():
     for i in range(10):
         eng.update(70.0, inv, max_inventory=333, now=released + i)
     assert eng.displacement_level == LOW, (eng.displacement_level, eng.displacement_cents)
-    print("test_displacement_stays_low_on_a_calm_market_and_ages_out: PASS")
 
 
 def test_displacement_high_hold_extends_on_retrigger():
@@ -1364,6 +1443,16 @@ def test_displacement_high_hold_extends_on_retrigger():
     eng = RiskEngine(ticker="TREND")
     inv = InventoryState(ticker="TREND")
     t0 = 1_000_000.0
+    _orig_hold = config.DISPLACEMENT_HIGH_HOLD_SECONDS
+    config.DISPLACEMENT_HIGH_HOLD_SECONDS = 1800.0
+    try:
+        _run_retrigger_checks(eng, inv, t0)
+    finally:
+        config.DISPLACEMENT_HIGH_HOLD_SECONDS = _orig_hold
+    print("test_displacement_high_hold_extends_on_retrigger: PASS")
+
+
+def _run_retrigger_checks(eng, inv, t0):
     for i in range(10):
         eng.update(10.0, inv, max_inventory=333, now=t0 + i)
     for i in range(10):
@@ -1387,7 +1476,6 @@ def test_displacement_high_hold_extends_on_retrigger():
     for i in range(5):
         eng.update(90.0, inv, max_inventory=333, now=past_first + i)
     assert eng.displacement_level == HIGH, "re-trigger must extend, not reset"
-    print("test_displacement_high_hold_extends_on_retrigger: PASS")
 
 
 def test_displacement_needs_a_few_samples_before_reporting():
@@ -1683,6 +1771,8 @@ if __name__ == "__main__":
     test_compute_quote_skews_toward_flattening_long_inventory()
     test_compute_quote_rests_at_reference_price_not_touch_when_they_differ()
     test_risk_engine_escalates_to_high_on_volatile_mid()
+    test_flatten_refuses_to_cross_at_a_ruinous_price()
+    test_flatten_walks_the_book_instead_of_assuming_infinite_top_of_book()
     test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
     test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations()
     test_maybe_execute_time_based_exit_fires_below_critical_and_not_above()
