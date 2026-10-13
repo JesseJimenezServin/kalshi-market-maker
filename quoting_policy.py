@@ -345,13 +345,15 @@ def flatten_position(
 
     if net > 0:
         applied = inventory.apply_no_fill(
-            no_price=round(100 - avg_yes_price), size=fillable, max_inventory=max_inventory
+            no_price=round(100 - avg_yes_price), size=fillable,
+            max_inventory=max_inventory, taker=True,
         )
         side = "no"  # the fill is booked as a NO buy (equiv. selling YES)
         price = round(100 - avg_yes_price)
     else:
         applied = inventory.apply_yes_fill(
-            price=round(avg_yes_price), size=fillable, max_inventory=max_inventory
+            price=round(avg_yes_price), size=fillable,
+            max_inventory=max_inventory, taker=True,
         )
         side = "yes"
         price = round(avg_yes_price)

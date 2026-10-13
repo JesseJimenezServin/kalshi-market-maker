@@ -55,6 +55,28 @@ CREATE TABLE IF NOT EXISTS inventory_marks (
                            -- new rows (see server.py's latest-per-ticker pattern)
 );
 
+-- Raw public trade tape. Added 2026-10-13.
+--
+-- NOT previously persisted, and its absence blocks the one experiment that
+-- decides whether this strategy can work: how fill probability trades off
+-- against reward score as we rest further behind the Reference Price. The
+-- score half of that curve is computable from orderbook_snapshots alone,
+-- but the FILL half needs the tape -- simulated_fills records OUR quote
+-- price, not the trade price, so there is no way to tell from it whether a
+-- deeper quote would also have been touched.
+--
+-- Every field here is what adverse_selection_sim.process_trade_for_inventory
+-- consumes, so a replay at any offset is exact rather than modelled.
+CREATE TABLE IF NOT EXISTS trades (
+    ts REAL NOT NULL,
+    ticker TEXT NOT NULL,
+    trade_yes_price INTEGER NOT NULL,
+    trade_count REAL NOT NULL,
+    taker_side TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trades_ticker_ts ON trades(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
+
 CREATE TABLE IF NOT EXISTS orderbook_snapshots (
     ts REAL NOT NULL,
     ticker TEXT NOT NULL,
@@ -261,6 +283,16 @@ class SimulationLogger:
             if col not in quote_cols:
                 conn.execute(f"ALTER TABLE quote_snapshots ADD COLUMN {col} {coltype}")
 
+        # Realized-P&L decomposition, added 2026-10-13. See InventoryState.
+        marks_cols = {row[1] for row in conn.execute("PRAGMA table_info(inventory_marks)")}
+        for col, coltype in (
+            ("realized_passive_cents", "REAL"),
+            ("realized_taker_cents", "REAL"),
+            ("realized_settlement_cents", "REAL"),
+        ):
+            if col not in marks_cols:
+                conn.execute(f"ALTER TABLE inventory_marks ADD COLUMN {col} {coltype}")
+
         fills_cols = {row[1] for row in conn.execute("PRAGMA table_info(simulated_fills)")}
         if "exit_reason" not in fills_cols:
             conn.execute("ALTER TABLE simulated_fills ADD COLUMN exit_reason TEXT")
@@ -319,16 +351,21 @@ class SimulationLogger:
         unrealized_pnl_cents: float,
         realized_pnl_cents: float,
         max_inventory: int | None = None,
+        realized_passive_cents: float | None = None,
+        realized_taker_cents: float | None = None,
+        realized_settlement_cents: float | None = None,
         ts: float | None = None,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO inventory_marks
                    (ts, ticker, net_yes_contracts, avg_entry_price, mid_price,
-                    unrealized_pnl_cents, realized_pnl_cents, max_inventory)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    unrealized_pnl_cents, realized_pnl_cents, max_inventory,
+                    realized_passive_cents, realized_taker_cents, realized_settlement_cents)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, net_yes_contracts, avg_entry_price, mid_price,
-                 unrealized_pnl_cents, realized_pnl_cents, max_inventory),
+                 unrealized_pnl_cents, realized_pnl_cents, max_inventory,
+                 realized_passive_cents, realized_taker_cents, realized_settlement_cents),
             )
 
     def log_orderbook_snapshot(
@@ -402,6 +439,26 @@ class SimulationLogger:
                    (ts, ticker, headline, source_url, relevance_score, theme_tags)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (ts or time.time(), ticker, headline, source_url, relevance_score, json.dumps(theme_tags)),
+            )
+
+    def log_trade(
+        self,
+        ticker: str,
+        trade_yes_price: int,
+        trade_count: float,
+        taker_side: str,
+        ts: float | None = None,
+    ) -> None:
+        """
+        One row per public trade print. Logged BEFORE any fill inference, so
+        the tape stays independent of whatever quote we happened to have --
+        that independence is the whole point (see the trades table comment).
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO trades (ts, ticker, trade_yes_price, trade_count, taker_side) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ts or time.time(), ticker, trade_yes_price, trade_count, taker_side),
             )
 
     def log_quote_snapshot(

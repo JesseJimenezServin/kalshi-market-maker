@@ -343,11 +343,20 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     # 11.79s respectively, which was most of a 34s dashboard build. The
     # window functions are also gone -- a plain GROUP BY with MAX(ts) gets
     # the same answers and was ~35% faster even uncached.
+    # The P&L epoch floors the window: marks before it belong to a run whose
+    # losses were dominated by defects that no longer exist (see
+    # config.PNL_EPOCH_TS and AUTOPSY.md). reward_score is NOT floored --
+    # reward capture was measured honestly throughout and the longer series
+    # is still informative.
+    pnl_cutoff = max(cutoff_ts, config.PNL_EPOCH_TS)
     oldest_bucket = int(cutoff_ts // bucket)
+    oldest_pnl_bucket = int(pnl_cutoff // bucket)
     for cache in (_hist_score_bucket, _hist_score_ts,
-                  _hist_pnl_bucket, _hist_pnl_ts,
                   _reward_bucket_accrual, _reward_bucket_end_ts):
         for b in [b for b in cache if b < oldest_bucket]:
+            del cache[b]
+    for cache in (_hist_pnl_bucket, _hist_pnl_ts):
+        for b in [b for b in cache if b < oldest_pnl_bucket]:
             del cache[b]
 
     # ---- reward score (unitless, cumulative sum of combined_score) ------
@@ -380,7 +389,7 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
     # market cannot cause a phantom balance jump. That carry-forward is why
     # the Python walk below has to start from the oldest bucket every tick,
     # even though the SQL does not.
-    resume = max(_hist_pnl_bucket, default=oldest_bucket)
+    resume = max(_hist_pnl_bucket, default=oldest_pnl_bucket)
     for r in conn.execute(
         f"""
         SELECT CAST(ts / ? AS INTEGER) AS b, ticker,
@@ -388,7 +397,7 @@ def _performance_history(conn: sqlite3.Connection) -> dict[str, list]:
         FROM inventory_marks WHERE ts >= ?{excl_sql}
         GROUP BY b, ticker ORDER BY b ASC
         """,
-        (bucket, float(resume * bucket), *excl_params),
+        (bucket, float(max(resume * bucket, pnl_cutoff)), *excl_params),
     ).fetchall():
         marks = _hist_pnl_bucket.setdefault(r["b"], {})
         marks[r["ticker"]] = (r["unrealized_pnl_cents"] or 0.0) + (r["realized_pnl_cents"] or 0.0)

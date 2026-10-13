@@ -343,6 +343,9 @@ async def scoring_loop(
                     mid_price=mid,
                     unrealized_pnl_cents=unrealized,
                     realized_pnl_cents=state.inventory.realized_pnl_cents,
+                    realized_passive_cents=state.inventory.realized_passive_cents,
+                    realized_taker_cents=state.inventory.realized_taker_cents,
+                    realized_settlement_cents=state.inventory.realized_settlement_cents,
                     max_inventory=state.max_inventory,
                 )
             except Exception:
@@ -437,6 +440,9 @@ def _settle_if_resolved(rest_client, ticker: str, state, sim_logger) -> float | 
         mid_price=final_price,
         unrealized_pnl_cents=0.0,
         realized_pnl_cents=state.inventory.realized_pnl_cents,
+        realized_passive_cents=state.inventory.realized_passive_cents,
+        realized_taker_cents=state.inventory.realized_taker_cents,
+        realized_settlement_cents=state.inventory.realized_settlement_cents,
         max_inventory=state.max_inventory,
     )
     logger.warning(
@@ -649,10 +655,6 @@ def make_trade_handler(
     async def on_trade(trade_msg: dict) -> None:
         ticker = trade_msg.get("market_ticker")
         try:
-            state = states.get(ticker)
-            if state is None or state.quote is None:
-                return
-
             # Kalshi's real trade fields are "yes_price_dollars" (dollar string)
             # and "count_fp" (fractional-capable "_fp" string) -- confirmed via
             # a live REST /markets/trades response 2026-09-01. Falling back to
@@ -670,6 +672,25 @@ def make_trade_handler(
 
             trade_yes_price = dollars_to_cents(raw_price) if isinstance(raw_price, str) else raw_price
             trade_count = fp_to_size(raw_count) if isinstance(raw_count, str) else raw_count
+
+            # Persist the tape FIRST, before any check on our own state.
+            #
+            # This deliberately sits above the state/quote guard below. The
+            # tape has to be independent of what we happened to be doing, or
+            # it cannot be replayed at a different offset -- and the periods
+            # where we have NO quote (HIGH risk, quote pulled) are exactly
+            # the ones worth replaying. Logging after the guard would have
+            # silently omitted them.
+            sim_logger.log_trade(
+                ticker=ticker,
+                trade_yes_price=trade_yes_price,
+                trade_count=trade_count,
+                taker_side=taker_side,
+            )
+
+            state = states.get(ticker)
+            if state is None or state.quote is None:
+                return
 
             book = orderbook_manager.books.get(ticker)
             if book is None:

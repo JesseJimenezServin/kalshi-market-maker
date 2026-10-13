@@ -51,10 +51,30 @@ class InventoryState:
     net_yes_contracts: int = 0  # positive = long yes, negative = long no
     avg_entry_price: float = 0.0  # cents, cost basis of net_yes_contracts
     realized_pnl_cents: float = 0.0
+    # Decomposition of realized_pnl_cents by HOW it was earned or lost.
+    # They sum to realized_pnl_cents.
+    #
+    # Added 2026-10-13 because the Phase 0 autopsy needed four ad-hoc
+    # scripts to separate these after the fact, and the single most
+    # important finding -- that taker exits cost $1,267 against a $747 total
+    # loss -- was only visible once they were pulled apart. That should be a
+    # property of the schema, not an archaeology exercise.
+    realized_passive_cents: float = 0.0      # closing fills we did NOT initiate
+    realized_taker_cents: float = 0.0        # crossing the spread (stops, switches)
+    realized_settlement_cents: float = 0.0   # resolved at 0/100
     fill_events: list[dict] = field(default_factory=list)
     max_inventory_hit: int = 0
 
-    def apply_yes_fill(self, price: int, size: int, max_inventory: int) -> int:
+    def _book_realized(self, delta: float, taker: bool) -> None:
+        """Single place that moves realized_pnl_cents, so the decomposition
+        cannot drift out of sync with the total."""
+        self.realized_pnl_cents += delta
+        if taker:
+            self.realized_taker_cents += delta
+        else:
+            self.realized_passive_cents += delta
+
+    def apply_yes_fill(self, price: int, size: int, max_inventory: int, taker: bool = False) -> int:
         """We bought `size` YES at `price`. Returns the size actually
         applied after clamping to max_inventory (rest assumed unfilled
         because we'd have pulled the quote)."""
@@ -71,7 +91,7 @@ class InventoryState:
         else:
             # covering a short-yes position
             covered = min(applied, -self.net_yes_contracts)
-            self.realized_pnl_cents += covered * (self.avg_entry_price - price)
+            self._book_realized(covered * (self.avg_entry_price - price), taker)
             self.net_yes_contracts += applied
             if self.net_yes_contracts > 0:
                 self.avg_entry_price = price  # flipped long
@@ -80,7 +100,7 @@ class InventoryState:
         self.fill_events.append({"side": "yes", "price": price, "size": applied, "ts": time.time()})
         return applied
 
-    def apply_no_fill(self, no_price: int, size: int, max_inventory: int) -> int:
+    def apply_no_fill(self, no_price: int, size: int, max_inventory: int, taker: bool = False) -> int:
         """We bought `size` NO at `no_price` (equivalent to selling YES at
         100 - no_price)."""
         equiv_yes_price = 100 - no_price
@@ -95,7 +115,7 @@ class InventoryState:
             self.avg_entry_price = total_cost / (-self.net_yes_contracts) if self.net_yes_contracts != 0 else 0.0
         else:
             covered = min(applied, self.net_yes_contracts)
-            self.realized_pnl_cents += covered * (equiv_yes_price - self.avg_entry_price)
+            self._book_realized(covered * (equiv_yes_price - self.avg_entry_price), taker)
             self.net_yes_contracts -= applied
             if self.net_yes_contracts < 0:
                 self.avg_entry_price = equiv_yes_price
@@ -138,6 +158,7 @@ class InventoryState:
             delta = (-net) * (self.avg_entry_price - final_yes_price)
 
         self.realized_pnl_cents += delta
+        self.realized_settlement_cents += delta
         self.net_yes_contracts = 0
         self.avg_entry_price = 0.0
         self.fill_events.append(

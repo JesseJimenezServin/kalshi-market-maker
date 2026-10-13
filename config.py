@@ -552,6 +552,27 @@ PERFORMANCE_HISTORY_BUCKET_SECONDS = 300  # 5 minutes
 DEAD_MARKET_EMPTY_BOOK_SECONDS = 120.0
 
 # --------------------------------------------------------------------------
+# P&L measurement epoch -- the Phase 0 reset
+# --------------------------------------------------------------------------
+# The dashboard's P&L and balance series count only inventory_marks at or
+# after this timestamp, so the reported balance restarts from
+# STARTING_CAPITAL_USD.
+#
+# Set 2026-10-13, closing out Phase 0 (see AUTOPSY.md). The -$746.73 that
+# preceded it is NOT a measurement of this strategy: $1,267 of it was
+# slippage from an unbounded exit path since fixed, $161 was fictitious
+# profit from phantom order book levels, and the run spanned six
+# behaviour-changing deploys with a longest consistent window of ~28 hours.
+# Carrying that balance forward would contaminate every future number with
+# defects that no longer exist.
+#
+# NOTHING IS DELETED. This is the same convention the project already uses
+# for pre-run noise (ts >= 1790836411) and CONTAMINATED_TICKERS: a
+# documented filter, not destructive cleanup. All 14 days remain queryable,
+# and the order book history is REQUIRED as input to offset_sweep.py.
+PNL_EPOCH_TS = 1791849600.0  # 2026-10-13 00:00:00 UTC
+
+# --------------------------------------------------------------------------
 # Contaminated markets (excluded from dashboard P&L / reward reporting)
 # --------------------------------------------------------------------------
 # These markets were watched while the orderbook.py float-residue bug was
