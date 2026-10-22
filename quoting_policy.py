@@ -171,9 +171,12 @@ def compute_quote(
       LOW      -> skewed Reference-Price base, unchanged size.
       ELEVATED -> skewed quote widened by config.WIDEN_TICKS_ELEVATED ticks
                   further from that base on each side.
-      HIGH     -> quote pulled entirely (returns None). The caller is
-                  responsible for separately invoking maybe_execute_stop_loss
-                  to decide whether inventory should be actively flattened.
+      HIGH     -> with config.TAKER_EXITS_ENABLED: quote pulled entirely
+                  (returns None), and the caller's maybe_execute_stop_loss
+                  decides whether to cross out. Without it (the default
+                  since 2026-10-22): only the inventory-REDUCING side rests,
+                  widened as at ELEVATED and sized to at most the position;
+                  None when flat.
 
     Take-profit (applied last, after skew/widen): if we hold inventory,
     the exit side is additionally capped so it never rests more
@@ -186,7 +189,14 @@ def compute_quote(
     effective_take_profit_margin and, for what happens below the
     critical threshold, maybe_execute_time_based_exit.
     """
-    if risk_level == HIGH:
+    # With taker exits off, HIGH no longer means "pull everything and let the
+    # hard stop cross out" -- there is no hard stop. Pulling both sides would
+    # leave a held position with no way to shrink and the market earning
+    # nothing until settlement. So HIGH pulls only the side that ADDS risk
+    # and keeps resting the side that reduces it (BLUEPRINT.md 3.1 / 3.5).
+    # Flat at HIGH there is nothing to reduce, so the quote is still pulled.
+    reduce_only = risk_level == HIGH and not config.TAKER_EXITS_ENABLED
+    if risk_level == HIGH and (not reduce_only or inventory.net_yes_contracts == 0):
         return None
 
     best_yes = book.best_yes_bid()
@@ -212,7 +222,7 @@ def compute_quote(
     yes_price -= skew_ticks
     no_price += skew_ticks
 
-    if risk_level == ELEVATED:
+    if risk_level in (ELEVATED, HIGH):
         yes_price -= config.WIDEN_TICKS_ELEVATED
         no_price -= config.WIDEN_TICKS_ELEVATED
 
@@ -244,6 +254,13 @@ def compute_quote(
     no_room = max(0, max_inventory + inventory.net_yes_contracts)
     yes_size = min(base_size, yes_room)
     no_size = min(base_size, no_room)
+    if reduce_only:
+        # Sized to the position so a fill can bring us flat but never flip us.
+        net = inventory.net_yes_contracts
+        if net > 0:
+            yes_size, no_size = 0, min(no_size, net)
+        else:
+            yes_size, no_size = min(yes_size, -net), 0
 
     if yes_size <= 0 and no_size <= 0:
         # Both sides capped: we are not quoting at all, so there is no quote
@@ -305,6 +322,12 @@ def flatten_position(
     """
     net = inventory.net_yes_contracts
     if net == 0:
+        return None
+    if not config.TAKER_EXITS_ENABLED:
+        # Hold to settlement -- see config.TAKER_EXITS_ENABLED. Debug, not
+        # warning: at HIGH with inventory this is reached every tick.
+        logger.debug("%s: taker exits disabled -- holding %d contracts (%s)",
+                     inventory.ticker, net, reason)
         return None
 
     best_yes = book.best_yes_bid()

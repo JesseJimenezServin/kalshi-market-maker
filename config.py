@@ -278,6 +278,31 @@ HARD_STOP_INVENTORY_FRACTION = 0.8
 # not risk management.
 MAX_FLATTEN_SLIPPAGE_CENTS = 10.0
 
+# Master switch for every exit that crosses the spread: the HIGH-risk hard
+# stop, the pre-resolution flatten, and flattening on a market switch. Off,
+# a position is held until it fills out passively or settles at 0/100.
+#
+# Turned off 2026-10-22, the one behaviour change of the Phase 0.6 window.
+# The slippage bound above did not stop the bleeding. In the 9 days after
+# the 10-13 reset, live realized P&L was -$704.20, of which taker exits were
+# -$822.71 and passive fills +$123.18 (96 forced exits, 49 of them
+# hard_stop_flatten). offset_sweep.py replayed the same 24,259-trade tape
+# with the quote held at the Reference Price and NO taker exits: fill P&L
+# -$53.44 including settlement of everything left open. Holding to
+# settlement is cheaper than any exit we have ever executed.
+#
+# The same sweep is why the quote stays AT the Reference Price rather than
+# backing off: one tick back cuts fills 83% but costs 47% of score, and
+# reward dollars outweigh fill cost ~1000x at the modelled share. Backing
+# off only wins if real reward turns out below ~1% of modelled.
+#
+# Safe because compute_quote already returns None at HIGH (a held position
+# cannot grow there) and settlement accounting books held positions at
+# their true outcome. market_switch_loop also refuses to leave a non-dead
+# market while holding inventory, since leaving without flattening would
+# drop the position from the books.
+TAKER_EXITS_ENABLED = False
+
 # Quote widening (in cents/ticks off best bid, after inventory skew is
 # applied) when risk_level == ELEVATED.
 WIDEN_TICKS_ELEVATED = 2

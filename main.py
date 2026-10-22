@@ -505,6 +505,19 @@ async def market_switch_loop(
                     trigger = switcher.check_trigger(ticker, state.risk_engine.risk_level, crowding)
                     if trigger is None:
                         continue
+                    # Leaving a live market drops its position from the
+                    # books, and with taker exits off there is no flatten to
+                    # close it first. Stay until it fills out or settles; the
+                    # dead path above settles before leaving. See
+                    # config.TAKER_EXITS_ENABLED.
+                    if not config.TAKER_EXITS_ENABLED and state.inventory.net_yes_contracts != 0:
+                        switcher.record_search_attempt()
+                        logger.info(
+                            "%s: '%s' trigger fired but holding %d contracts with taker exits "
+                            "disabled -- staying until flat or settled",
+                            ticker, trigger, state.inventory.net_yes_contracts,
+                        )
+                        continue
 
                 logger.warning(
                     "%s: sustained '%s' trigger fired (risk=%s, crowding=%s) -- searching for a replacement market",

@@ -9,9 +9,11 @@ determine whether a basic two-sided quoting strategy earns more in reward
 income than it loses to adverse selection, on which markets, before any
 real capital or live orders are involved.
 
-## Current Phase: Phase 0 (paper trading / simulation, read-only)
-Status: core pipeline built and wired correctly. Not yet run for a
-sustained data-collection window.
+## Current Phase: Phase 0.6 (paper trading / simulation, read-only)
+Status: Phase 0 autopsied (AUTOPSY.md), Phase 0.5 gate passed 2026-10-22
+(offset 0, see that entry). Running a frozen 14-day window with taker
+exits disabled -- the only behaviour change. Do not deploy behaviour
+changes until it ends.
 
 ## Environment
 - macOS, Python 3.13, repo at ~/Downloads/kalshi_liquidity_lab
@@ -2047,6 +2049,79 @@ the mistake that caused this incident, so this one wants watching: the
 specific thing to check is whether HIGH episodes now coincide with REFUSED
 flattens in the log rather than 90c+ crossings.
 
+## 2026-10-22: Phase 0.5 gate answered; Phase 0.6 window opens
+
+### The gate (BLUEPRINT.md section 6), answered on 217.9h of tape
+offset_sweep.py --since 1791849600 on the Droplet, 24,259 trades, 94,552
+sampled books, quote held continuously, no taker exits, open positions
+settled via the Kalshi API at the end:
+
+    offset  score vs 0  fills/hr  fill P&L $  reward $ (upper bound)
+      0       100.0%     205.0      -53.44      75,099.70
+      1        52.7%      35.0     +257.63      39,549.66
+      2        27.5%      26.8     +185.14      20,669.45
+      3        14.6%      23.9     +143.43      10,951.26
+
+Reward outweighs fill cost by ~1000x at offset 0. Backing off a tick cuts
+fills 83% and turns fill P&L positive, but gives up $35,550 of modelled
+reward to save $311 of fill cost -- it only wins if real reward is below
+~0.9% of modelled. GATE PASSED, offset 0 kept. The remaining uncertainty is
+entirely the competitive response (BLUEPRINT.md section 5), which only
+Phase 1 can measure.
+
+Sweep fixes made before trusting it: (1) open positions are now settled or
+marked at the end -- before, inventory pinned at the 333 cap was simply
+invisible; (2) "filled ct" counted change in |position|, so a +10 -> -10
+fill counted 0 -- it now sums actual fill sizes; (3) reward dollars are
+computed per offset (dashboard convention, combined/2 x pool rate x time,
+gaps capped at 120s) and netted against fill P&L, with a reward-halved
+stress column. Each trade's book is loaded once for all offsets.
+
+Caveat: replayed offset-0 score is 0.0979 vs 0.0404 recorded live since
+the reset. The live bot widens, skews and pulls size; the replay does not.
+That flatters the absolute reward, not the ranking between offsets.
+
+### The live run since the reset, unchanged code (10-13 -> 10-22)
+    realized P&L        -$704.20   (44 markets)
+      passive fills     +$123.18
+      taker exits       -$822.71   (96 forced exits; 49 hard_stop_flatten,
+                                    24 pre_resolution, 23 market_switch)
+      settlement         -$23.81
+    unrealized           -$39.89
+
+The 10c slippage bound did not stop it. Same tape, replayed with no taker
+exits at all: -$53.44. The exit path is still the whole loss.
+
+### The one behaviour change: config.TAKER_EXITS_ENABLED = False
+Nothing crosses the spread any more. flatten_position returns None, so the
+hard stop, the pre-resolution flatten and switch flattens all hold. Two
+consequences handled, both found by asking what else depends on the exit
+(the 10-09 lesson):
+  - HIGH used to pull BOTH sides and rely on the hard stop to get out.
+    With no hard stop that strands the position: no way to shrink it and
+    no reward until settlement. HIGH now rests only the inventory-reducing
+    side, widened as at ELEVATED, sized to at most the position so it can
+    never flip us. Flat at HIGH is still fully pulled.
+  - Leaving a live market without flattening drops the position from the
+    books. market_switch_loop now refuses a non-dead switch while holding
+    inventory (backs off one cooldown). The dead path settles first, as
+    before.
+The old mechanics stay behind the flag and their tests still run with it
+on. New tests pin the default and the reduce-only HIGH quote.
+
+### Window
+Deploy restarts main.py, which starts every market flat (no position
+restore). Three small positions were open at restart
+(KXTRUMPAPPROVE-26OCT22-A38.5 +14, -E38.3 -27, -E38.4 -51, ~$2
+unrealized); run `backfill_settlements.py --apply` once they resolve.
+PHASE 0.6 WINDOW STARTED 2026-10-22 04:21:36 UTC (ts 1792642896), the
+kalshi-lab restart. Ends 2026-11-05 04:21 UTC. Verified at start: droplet
+files hash-identical to local, all 74 tests pass in the service venv, all 3
+auto-selected markets qualifying both sides, 0 forced exits, healthcheck
+exit 0. Pre-deploy copies in /root/kalshi_liquidity_lab/predeploy_20261022/. Gate: 14 consecutive
+days, NO behaviour changes, net simulated P&L plus modelled reward
+positive with the competitive-response caveat stated.
+
 ## Target architecture: nothing runs on the laptop
 
 GOAL (stated 2026-10-02): this laptop is a viewing terminal only. No
@@ -2243,20 +2318,12 @@ silent-failure candidate of exactly the 10-02 kind, since main.py will
 simply start failing writes when the disk fills.
 
 ## Next steps (in order)
-1. Let the live run actually accumulate data -- the pipeline now picks
-   its own watch list at startup and can switch away mid-run on its own
-   (risk engine, reference-price quoting, market switcher armed and
-   throttle-fixed, news + event-calendar signals, autonomous selection),
-   but has very little real runtime behind it yet.
-2. DONE 2026-10-01: main.py deployed to a DigitalOcean Droplet as a
-   systemd service, so data collection no longer stops when this laptop
-   sleeps. Remaining follow-on: finish removing the laptop from the
-   system entirely (dashboard + off-box backup) -- see "Target
-   architecture: nothing runs on the laptop".
-3. Run continuously for 1-2 weeks minimum, spanning quiet periods and at
-   least one volatility event.
-4. Analyze data/paper_trading.sqlite: compare avg snapshot score x period
-   reward against worst-case adverse-selection swings per market.
-5. Decision gate: only markets where reward plausibly exceeds worst-case
-   risk proceed to Phase 1 (small live pilot, real orders, new code not
-   yet built).
+1. Leave main.py alone for 14 days from the 2026-10-22 deploy. Read-only
+   analysis and docs are fine; behaviour changes are not.
+2. Once the three 26OCT22 markets resolve: backfill_settlements.py --apply.
+3. Watch for: HIGH episodes now resting a reduce-only quote; "staying until
+   flat or settled" switch refusals; taker P&L staying at exactly 0.
+4. Re-run offset_sweep.py periodically -- the tape keeps growing and the
+   ranking should be stable. Rerun with --since <window start> at the end.
+5. At day 14: gate per BLUEPRINT.md section 6. Pass -> Phase 1 (one market,
+   minimum qualifying size, real orders; measure observed vs modelled share).

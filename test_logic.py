@@ -4,6 +4,7 @@ reconstruction, the reward-scoring formula, and the inventory simulator.
 Run with: python3 test_logic.py
 """
 
+import contextlib
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -418,6 +419,69 @@ def test_risk_engine_escalates_to_high_on_volatile_mid():
         engine.update(mid, inventory, max_inventory=500)
     assert engine.risk_level == HIGH, engine.risk_level
     print("test_risk_engine_escalates_to_high_on_volatile_mid: PASS")
+
+
+@contextlib.contextmanager
+def _taker_exits_enabled():
+    orig = config.TAKER_EXITS_ENABLED
+    config.TAKER_EXITS_ENABLED = True
+    try:
+        yield
+    finally:
+        config.TAKER_EXITS_ENABLED = orig
+
+
+def test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled():
+    """
+    Without a hard stop, pulling both sides at HIGH would strand a held
+    position with no way to shrink and no reward until settlement. HIGH must
+    pull only the side that adds risk, sized so a fill cannot flip us.
+    """
+    book = MarketBook(ticker="TEST")
+    book.apply_snapshot(sid=1, seq=1, yes=[[50, 100]], no=[[48, 100]])
+
+    long_inv = InventoryState(ticker="TEST", net_yes_contracts=40, avg_entry_price=40.0)
+    q = compute_quote(book, HIGH, long_inv, base_size=100, max_inventory=500, target_size=100)
+    assert q is not None
+    assert q.yes_size == 0, "long yes: never buy more yes at HIGH"
+    assert q.no_size == 40, "reducing side capped at the position"
+
+    short_inv = InventoryState(ticker="TEST", net_yes_contracts=-250, avg_entry_price=60.0)
+    q = compute_quote(book, HIGH, short_inv, base_size=100, max_inventory=500, target_size=100)
+    assert q is not None and q.no_size == 0 and q.yes_size == 100
+
+    # Flat at HIGH: nothing to reduce, still pulled.
+    assert compute_quote(book, HIGH, InventoryState(ticker="TEST"), base_size=100,
+                         max_inventory=500, target_size=100) is None
+    # With taker exits on, the old behaviour stands: pulled entirely.
+    with _taker_exits_enabled():
+        assert compute_quote(book, HIGH, long_inv, base_size=100, max_inventory=500, target_size=100) is None
+    print("test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled: PASS")
+
+
+def test_taker_exits_disabled_holds_every_exit_path():
+    """
+    2026-10-22: after the reset, taker exits cost -$822.71 against +$123.18
+    of passive P&L. With config.TAKER_EXITS_ENABLED off, the hard stop, the
+    pre-resolution flatten and a switch flatten must all hold the position,
+    even on a tight book where crossing would be cheap.
+    """
+    assert config.TAKER_EXITS_ENABLED is False, "the shipped default holds to settlement"
+    book = MarketBook(ticker="TIGHT")
+    book.apply_snapshot(sid=1, seq=1, yes=[[49, 5000]], no=[[50, 5000]])
+
+    inv = InventoryState(ticker="TIGHT", net_yes_contracts=450, avg_entry_price=45.0)
+    assert maybe_execute_stop_loss(book, inv, risk_level=HIGH, max_inventory=500, hard_stop_fraction=0.8) is None
+    assert maybe_execute_time_based_exit(book, inv, minutes_until_close=5.0, max_inventory=500, critical_minutes=15) is None
+    assert quoting_policy.flatten_position(book, inv, max_inventory=500, reason="market_switch_crowded") is None
+    assert inv.net_yes_contracts == 450, "position held intact"
+    assert inv.realized_pnl_cents == 0.0 and inv.realized_taker_cents == 0.0
+
+    # ...and the same position DOES flatten when the switch is on, so the
+    # assertions above are testing the switch and not a broken book.
+    with _taker_exits_enabled():
+        assert quoting_policy.flatten_position(book, inv, max_inventory=500, reason="hard_stop_flatten") is not None
+    print("test_taker_exits_disabled_holds_every_exit_path: PASS")
 
 
 def test_flatten_refuses_to_cross_at_a_ruinous_price():
@@ -1771,11 +1835,16 @@ if __name__ == "__main__":
     test_compute_quote_skews_toward_flattening_long_inventory()
     test_compute_quote_rests_at_reference_price_not_touch_when_they_differ()
     test_risk_engine_escalates_to_high_on_volatile_mid()
-    test_flatten_refuses_to_cross_at_a_ruinous_price()
-    test_flatten_walks_the_book_instead_of_assuming_infinite_top_of_book()
-    test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
-    test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations()
-    test_maybe_execute_time_based_exit_fires_below_critical_and_not_above()
+    # These pin the taker-exit MECHANICS, which must keep working if
+    # config.TAKER_EXITS_ENABLED is ever turned back on.
+    with _taker_exits_enabled():
+        test_flatten_refuses_to_cross_at_a_ruinous_price()
+        test_flatten_walks_the_book_instead_of_assuming_infinite_top_of_book()
+        test_maybe_execute_stop_loss_flattens_at_hard_stop_and_not_otherwise()
+        test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations()
+        test_maybe_execute_time_based_exit_fires_below_critical_and_not_above()
+    test_taker_exits_disabled_holds_every_exit_path()
+    test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled()
     test_effective_take_profit_margin_decays_with_time_and_hits_zero_at_critical()
     test_compute_quote_applies_take_profit_floor_on_exit_side()
     test_classify_fill_exit_reason()

@@ -65,6 +65,10 @@ default to persisting raw inputs, not just derived outputs.
   offset 0 → 1 costs **46.5% of score**, far worse than the ~10%/tick that
   `discount_factor` alone implies, because backing off also lands us behind
   much more resting size. Qualification holds at 99.9% at every offset.
+- **Fill rate vs offset, the gate** (2026-10-22, 24,259 tape trades): one
+  tick back cuts fills 83% but reward dollars outweigh fill cost ~1000x, so
+  offset 0 wins unless real reward is under ~1% of modelled. See the
+  2026-10-22 entry in `PROJECT_STATUS.md`.
 - Fill realism: our fills were **2.7% of real market volume** against a
   2.2% modelled share — the fill model was never the optimistic part.
 - Fill imbalance: **47% mean**, markets up to 100% one-sided.
