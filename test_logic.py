@@ -459,6 +459,20 @@ def test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled():
     print("test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled: PASS")
 
 
+def test_market_runtime_state_initialises_quote_and_close_time():
+    """
+    Regression: quote/close_time were unreachable code after is_dead()'s
+    return, so a market switched in mid-run raised AttributeError on every
+    scoring tick (2026-10-22: ~2.4 h each for two markets, no quoting).
+    """
+    from main import MarketRuntimeState
+    st = MarketRuntimeState("SWITCHED-IN", target_size=100.0, discount_factor=0.9, max_inventory=300)
+    assert st.quote is None
+    assert st.close_time is None
+    assert st.is_dead(now=time.time()) is False
+    print("test_market_runtime_state_initialises_quote_and_close_time: PASS")
+
+
 def test_taker_exits_disabled_holds_every_exit_path():
     """
     2026-10-22: after the reset, taker exits cost -$822.71 against +$123.18
@@ -1844,6 +1858,7 @@ if __name__ == "__main__":
         test_maybe_execute_stop_loss_refined_threshold_protects_small_allocations()
         test_maybe_execute_time_based_exit_fires_below_critical_and_not_above()
     test_taker_exits_disabled_holds_every_exit_path()
+    test_market_runtime_state_initialises_quote_and_close_time()
     test_high_risk_rests_only_the_reducing_side_when_taker_exits_disabled()
     test_effective_take_profit_margin_decays_with_time_and_hits_zero_at_critical()
     test_compute_quote_applies_take_profit_floor_on_exit_side()

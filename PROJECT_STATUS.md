@@ -11,7 +11,8 @@ real capital or live orders are involved.
 
 ## Current Phase: Phase 0.6 (paper trading / simulation, read-only)
 Status: Phase 0 autopsied (AUTOPSY.md), Phase 0.5 gate passed 2026-10-22
-(offset 0, see that entry). Running a frozen 14-day window with taker
+(offset 0, see that entry). Window restarted 2026-10-23 22:55 UTC (switch-in
+crash fix), ends 2026-11-06. Running a frozen 14-day window with taker
 exits disabled -- the only behaviour change. Do not deploy behaviour
 changes until it ends.
 
@@ -2115,12 +2116,50 @@ restore). Three small positions were open at restart
 (KXTRUMPAPPROVE-26OCT22-A38.5 +14, -E38.3 -27, -E38.4 -51, ~$2
 unrealized); run `backfill_settlements.py --apply` once they resolve.
 PHASE 0.6 WINDOW STARTED 2026-10-22 04:21:36 UTC (ts 1792642896), the
-kalshi-lab restart. Ends 2026-11-05 04:21 UTC. Verified at start: droplet
+kalshi-lab restart. (Superseded: restarted 2026-10-23 22:55 UTC, see that
+entry; ends 2026-11-06 22:55 UTC.) Verified at start: droplet
 files hash-identical to local, all 74 tests pass in the service venv, all 3
 auto-selected markets qualifying both sides, 0 forced exits, healthcheck
 exit 0. Pre-deploy copies in /root/kalshi_liquidity_lab/predeploy_20261022/. Gate: 14 consecutive
 days, NO behaviour changes, net simulated P&L plus modelled reward
 positive with the competitive-response caveat stated.
+
+## 2026-10-23: switch-in crash fixed; window restarted; droplet hardened
+
+### The bug (present since 2026-10-04)
+When `is_dead()` was added to `MarketRuntimeState` it was pasted into the
+middle of `__init__`, so the lines setting `self.quote` and
+`self.close_time` sat after its `return` and never ran. Markets built in
+run() got the attributes elsewhere, but every market SWITCHED IN mid-run
+crashed each scoring tick with AttributeError until event_refresh_loop set
+close_time. On 2026-10-22 that was ~2.4 h each for KXRAINONT and
+KXAAAGASDGA (5,702 failed ticks), with no quote, no reward and no fills. It
+silently suppressed reward on every switch since 10-04. Fixed by moving the
+two lines back into `__init__`; regression test
+`test_market_runtime_state_initialises_quote_and_close_time`.
+
+### Window restarted
+The 10-22 window was already broken: needrestart restarted kalshi-lab at
+06:01 UTC on 10-22 after an xz-utils update. The fix needs a restart anyway,
+so **PHASE 0.6 WINDOW RESTARTED 2026-10-23 22:55:48 UTC; ends 2026-11-06
+22:55 UTC.** Same behaviour as the previous window (TAKER_EXITS_ENABLED =
+False) plus this bug fix. Pre-deploy copies are in
+/root/kalshi_liquidity_lab/predeploy_20261023/.
+Dropped from the books at restart: KXRAINONT-27FEB27-27FEB27-T0, short 342
+(-$15.39 unrealized). It resolves Feb 2027, so there is nothing to backfill
+soon.
+
+### Droplet changes (shared with kalshi_bot)
+- `/etc/needrestart/conf.d/90-kalshi.conf`: needrestart never auto-restarts
+  `kalshi-*` services. They keep the old library until restarted by hand.
+- `/etc/ssh/sshd_config.d/00-kalshi-hardening.conf`: key-only SSH
+  (PasswordAuthentication no, PermitRootLogin prohibit-password). It
+  overrides cloud-init's "PasswordAuthentication yes", which had left root
+  open to password guessing. Verified: a new key login works, and a
+  password attempt is refused.
+- Not done: a newer kernel (6.8.0-147, running -124) is installed and
+  /var/run/reboot-required is set. Unattended-upgrades does not auto-reboot,
+  so nothing happens on its own. Reboot deliberately after this window ends.
 
 ## Target architecture: nothing runs on the laptop
 

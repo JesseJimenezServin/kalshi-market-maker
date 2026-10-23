@@ -94,6 +94,20 @@ class MarketRuntimeState:
         # reads it to detect a settled market -- see
         # config.DEAD_MARKET_EMPTY_BOOK_SECONDS.
         self.empty_book_since: float | None = None
+        self.quote: HypotheticalQuote | None = None  # set once we have book data
+        # Cached by event_calendar.event_refresh_loop; static once fetched,
+        # so scoring_loop can compute minutes_until_close fresh every tick
+        # (for take-profit time-decay / the pre-resolution forced exit --
+        # see quoting_policy.py) without an extra network call per tick.
+        #
+        # These two lines used to sit AFTER is_dead()'s return statement
+        # (is_dead was pasted into the middle of __init__ on 2026-10-04), so
+        # they never ran. Markets built in run() got the attributes set
+        # elsewhere, but a market switched in mid-run crashed every scoring
+        # tick with AttributeError until event_refresh_loop happened to set
+        # close_time -- ~2.4 h each for two markets on 2026-10-22, with no
+        # quote, no reward and no fills meanwhile.
+        self.close_time: datetime | None = None
 
     def is_dead(self, now: float) -> bool:
         """Both sides of the book empty for longer than the threshold."""
@@ -101,12 +115,6 @@ class MarketRuntimeState:
             self.empty_book_since is not None
             and (now - self.empty_book_since) >= config.DEAD_MARKET_EMPTY_BOOK_SECONDS
         )
-        self.quote: HypotheticalQuote | None = None  # set once we have book data
-        # Cached by event_calendar.event_refresh_loop; static once fetched,
-        # so scoring_loop can compute minutes_until_close fresh every tick
-        # (for take-profit time-decay / the pre-resolution forced exit --
-        # see quoting_policy.py) without an extra network call per tick.
-        self.close_time: datetime | None = None
 
 
 def build_market_states(
