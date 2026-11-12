@@ -8,8 +8,8 @@
 # retention would have filled the disk mid-run). This still streams RAW
 # sqlite bytes so existing pullers keep working unchanged -- it just
 # decompresses on the way out. Handles legacy uncompressed backups too.
-LATEST=$(ls -t /root/kalshi_liquidity_lab/data/backups/paper_trading_*.sqlite.gz \
-                /root/kalshi_liquidity_lab/data/backups/paper_trading_*.sqlite \
+LATEST=$(ls -t /root/kalshi-market-maker/data/backups/paper_trading_*.sqlite.gz \
+                /root/kalshi-market-maker/data/backups/paper_trading_*.sqlite \
          2>/dev/null | head -1)
 if [ -z "$LATEST" ]; then
     exit 1

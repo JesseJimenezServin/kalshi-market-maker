@@ -2,7 +2,7 @@
 # Healthcheck for the whole Kalshi Market Maker box, run from cron every
 # 5 minutes. Checks the things whose silent failure would cost data:
 #
-#   1. kalshi-lab is active                       (the collector)
+#   1. kalshi-market-maker is active                       (the collector)
 #   2. the DB is readable AND actually growing     (a hung-but-"active"
 #      process looks fine to systemctl while producing nothing)
 #   3. kalshi-dashboard is active                 (non-critical; no data loss)
@@ -46,8 +46,8 @@ if [ -z "${NTFY_TOPIC:-}" ]; then
     exit 2
 fi
 
-DB_PATH="${DB_PATH:-/root/kalshi_liquidity_lab/data/paper_trading.sqlite}"
-PYTHON="/root/kalshi_liquidity_lab/venv/bin/python3"
+DB_PATH="${DB_PATH:-/root/kalshi-market-maker/data/paper_trading.sqlite}"
+PYTHON="/root/kalshi-market-maker/venv/bin/python3"
 STALE_SECONDS=600          # no new row in 10 min -> treat as stuck, same as down
 OFFBOX_MARKER="${OFFBOX_MARKER:-/var/lib/kalshi-offbox/last-success}"
 OFFBOX_STALE_SECONDS=129600  # 36h: the timer is daily, so this tolerates one
@@ -75,7 +75,7 @@ notify() {
             return 0
         fi
     fi
-    if curl -s -m 10 -H "Priority: ${_prio}" -H "Title: kalshi-lab: ${_key}" \
+    if curl -s -m 10 -H "Priority: ${_prio}" -H "Title: kalshi-market-maker: ${_key}" \
             -d "$_msg" "https://ntfy.sh/${NTFY_TOPIC}" >/dev/null 2>&1; then
         echo "$_now" > "$_stamp"
     else
@@ -91,9 +91,9 @@ HOST=$(hostname)
 PROBLEMS=0
 
 # ---- 1 & 2: the collector --------------------------------------------------
-if ! systemctl is-active --quiet kalshi-lab; then
+if ! systemctl is-active --quiet kalshi-market-maker; then
     notify "collector-down" "urgent" \
-        "kalshi-lab is NOT active on ${HOST} -- systemd says: $(systemctl is-active kalshi-lab 2>&1). DATA COLLECTION HAS STOPPED."
+        "kalshi-market-maker is NOT active on ${HOST} -- systemd says: $(systemctl is-active kalshi-market-maker 2>&1). DATA COLLECTION HAS STOPPED."
     PROBLEMS=1
 else
     clear_issue "collector-down"
@@ -109,12 +109,12 @@ except Exception:
 
     if [ -z "$AGE_INT" ]; then
         notify "db-unreadable" "urgent" \
-            "kalshi-lab on ${HOST}: service is active but could not read inventory_marks from the DB at all"
+            "kalshi-market-maker on ${HOST}: service is active but could not read inventory_marks from the DB at all"
         PROBLEMS=1
     elif [ "$AGE_INT" -gt "$STALE_SECONDS" ]; then
         clear_issue "db-unreadable"
         notify "collector-stuck" "urgent" \
-            "kalshi-lab on ${HOST}: service shows active but no new DB row in ${AGE_INT}s (stuck?)"
+            "kalshi-market-maker on ${HOST}: service shows active but no new DB row in ${AGE_INT}s (stuck?)"
         PROBLEMS=1
     else
         clear_issue "db-unreadable"

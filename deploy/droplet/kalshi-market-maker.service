@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/kalshi_liquidity_lab
-ExecStart=/root/kalshi_liquidity_lab/venv/bin/python3 /root/kalshi_liquidity_lab/main.py
+WorkingDirectory=/root/kalshi-market-maker
+ExecStart=/root/kalshi-market-maker/venv/bin/python3 /root/kalshi-market-maker/main.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

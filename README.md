@@ -11,9 +11,8 @@ about 2.8 million snapshots. **It never placed a real order.** Every trade
 described here was simulated against live market data.
 
 **Status: concluded (2026-10-26).** The strategy lost money in simulation,
-and the analysis below explains why. Originally called *Kalshi Liquidity Lab*;
-paths under `/root/kalshi_liquidity_lab` in `deploy/` are the real paths it
-ran at.
+and the analysis below explains why. Originally called *Kalshi Liquidity Lab*
+(`kalshi_liquidity_lab`); older commits use that name.
 
 > **Sister project:** [Kalshi-Bot](https://github.com/JesseJimenezServin/Kalshi-Bot)
 > asked a different question (do new markets open mispriced?) and reused the

@@ -31,7 +31,7 @@ Live on the Droplet. `kalshi-offbox-backup.timer` is armed (daily
 
 ```bash
 # 0. From the laptop, copy this directory up (needs the admin key added first)
-rsync -av --rsync-path="sudo rsync" deploy/ root@<droplet-ip>:/root/kalshi_liquidity_lab/deploy/
+rsync -av --rsync-path="sudo rsync" deploy/ root@<droplet-ip>:/root/kalshi-market-maker/deploy/
 
 # 1. Dependencies
 apt-get update && apt-get install -y rclone sqlite3   # neither was present
@@ -61,21 +61,21 @@ apt-get update && apt-get install -y rclone sqlite3   # neither was present
 chmod 600 /root/.config/rclone/rclone.conf
 
 # 3. Config file
-cp /root/kalshi_liquidity_lab/deploy/kalshi-offbox.env.example /etc/kalshi-offbox.env
+cp /root/kalshi-market-maker/deploy/kalshi-offbox.env.example /etc/kalshi-offbox.env
 chmod 600 /etc/kalshi-offbox.env
 vi /etc/kalshi-offbox.env     # set RCLONE_REMOTE and NTFY_TOPIC at minimum
 
 # 4. FIRST RUN BY HAND -- do not skip. Confirms free space, snapshot
 #    integrity, upload, and the read-back size check all pass on real data.
-/root/kalshi_liquidity_lab/deploy/push_offbox_backup.sh; echo "exit=$?"
+/root/kalshi-market-maker/deploy/push_offbox_backup.sh; echo "exit=$?"
 
 # 5. Prove the alerting works before relying on it. A backup you cannot
 #    see fail is the bug this replaces.
 NTFY_TOPIC=<topic> DB_PATH=/nonexistent \
-  /root/kalshi_liquidity_lab/deploy/push_offbox_backup.sh   # expect exit=1 + a push notification
+  /root/kalshi-market-maker/deploy/push_offbox_backup.sh   # expect exit=1 + a push notification
 
 # 6. Arm the timer
-cp /root/kalshi_liquidity_lab/deploy/kalshi-offbox-backup.{service,timer} /etc/systemd/system/
+cp /root/kalshi-market-maker/deploy/kalshi-offbox-backup.{service,timer} /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now kalshi-offbox-backup.timer
 systemctl list-timers kalshi-offbox-backup.timer
@@ -105,7 +105,7 @@ point. Keep it or delete it, but it should no longer be scheduled.
 ## Droplet infrastructure now in `droplet/`
 
 `backup_db.py`, `push_latest_backup.sh`, `healthcheck.sh`,
-`kalshi-lab.service`, `kalshi-dashboard.service` and root's crontab are
+`kalshi-market-maker.service`, `kalshi-dashboard.service` and root's crontab are
 all under `droplet/` as of 2026-10-02/03, so the box is reproducible
 from the repo rather than only from its own disk.
 

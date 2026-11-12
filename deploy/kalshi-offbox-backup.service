@@ -1,12 +1,12 @@
 [Unit]
 Description=Push a compressed Kalshi Market Maker DB snapshot off-box
-Documentation=file:/root/kalshi_liquidity_lab/deploy/README.md
+Documentation=file:/root/kalshi-market-maker/deploy/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/root/kalshi_liquidity_lab/deploy/push_offbox_backup.sh
+ExecStart=/root/kalshi-market-maker/deploy/push_offbox_backup.sh
 # Nice/IOSchedulingClass: this shares a single vCPU with main.py, which is
 # the process that must never be starved -- the backup can take longer.
 Nice=10

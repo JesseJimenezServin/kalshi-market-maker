@@ -26,8 +26,8 @@ import time
 import pathlib
 from pathlib import Path
 
-DB_PATH = Path("/root/kalshi_liquidity_lab/data/paper_trading.sqlite")
-BACKUP_DIR = Path("/root/kalshi_liquidity_lab/data/backups")
+DB_PATH = Path("/root/kalshi-market-maker/data/paper_trading.sqlite")
+BACKUP_DIR = Path("/root/kalshi-market-maker/data/backups")
 KEEP_LAST = 5
 
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)

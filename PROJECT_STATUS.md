@@ -1,4 +1,4 @@
-# Kalshi Liquidity Lab -- Project Status
+# Kalshi Market Maker -- Project Status
 
 git identity configured for contribution tracking (2026-09-02): repo-level
 user.name/user.email set to JesseJimenezServin / nuvusbusiness@gmail.com.
@@ -17,9 +17,9 @@ exits disabled -- the only behaviour change. Do not deploy behaviour
 changes until it ends.
 
 ## Environment
-- macOS, Python 3.13, repo at ~/Downloads/kalshi_liquidity_lab
+- macOS, Python 3.13, repo at ~/Downloads/kalshi-market-maker
 - Kalshi demo environment, RSA-PSS auth verified working
-- GitHub: JesseJimenezServin/kalshi_liquidity_lab (private)
+- GitHub: JesseJimenezServin/kalshi-market-maker (private)
 - .env and private_key.pem are gitignored; .env now loaded via
   python-dotenv (fixed 2026-08-31)
 
@@ -320,7 +320,7 @@ changes until it ends.
   book can tell us. True validation requires Phase 1 real fills, not
   fixable in pure simulation.
 - Deployed as of 2026-10-01: main.py runs on the Droplet
-  (kalshi-lab.service), with a localhost-only kalshi-dashboard.service
+  (kalshi-market-maker.service), with a localhost-only kalshi-dashboard.service
   beside it. A laptop dashboard and a laptop-side backup pull also still
   exist; both are being retired -- see "Target architecture: nothing runs
   on the laptop" below.
@@ -727,7 +727,7 @@ down, and now it can't.
 
 ## 2026-10-01 06:33:29 UTC -- OFFICIAL START of the 1-2 week unattended run
 Deployed to a DigitalOcean Droplet (<droplet-ip>, ubuntu-s-1vcpu-1gb-nyc1)
-as a systemd service (kalshi-lab.service, Restart=on-failure, enabled at
+as a systemd service (kalshi-market-maker.service, Restart=on-failure, enabled at
 boot), with a second localhost-only dashboard service
 (kalshi-dashboard.service, view via SSH tunnel), a 5-minute healthcheck
 cron alerting to a private ntfy.sh topic on failure, and a two-layer
@@ -783,7 +783,7 @@ to droplet_backups/launchd.log while pull.log stayed frozen at its last
 success. So the off-box copy stopped the same evening the official
 unattended run was marked as started, and the 09-30 -> 10-02 window had
 no second copy anywhere.
-FIX: moved the repo to ~/projects/kalshi_liquidity_lab (out of the
+FIX: moved the repo to ~/projects/kalshi-market-maker (out of the
 TCC-protected folder) and updated the only two places that hardcoded the
 old absolute path -- DEST_DIR here and the three path strings in
 ~/Library/LaunchAgents/com.kalshi.droplet-backup-pull.plist. config.py
@@ -1104,7 +1104,7 @@ FIX, two parts:
     run plus jitter). It also checks the timer unit is still armed, which
     catches the failure earlier than the marker would.
 
-GAP 3 -- the healthcheck only watched kalshi-lab. It now also checks
+GAP 3 -- the healthcheck only watched kalshi-market-maker. It now also checks
 kalshi-dashboard (flagged non-critical in the alert text itself, since
 losing the dashboard costs no data) and kalshi-offbox-backup.timer.
 The script no longer exits at the first problem: it checks everything and
@@ -1265,7 +1265,7 @@ FIX.
   5.551115123125783e-17"), snapshot-carrying-a-zero-level, and
   legitimately-fractional-sizes-preserved. The last one exists
   specifically to stop someone "simplifying" the fix into rounding.
-CONFIRMED after restarting kalshi-lab so books rebuilt from fresh
+CONFIRMED after restarting kalshi-market-maker so books rebuilt from fresh
 snapshots: 0 phantom levels and 0 phantom best-levels in 3452 levels
 across 518 new snapshots, against 31.6% before.
 
@@ -1294,7 +1294,7 @@ independently of this bug.
 
 ## 2026-10-04 INCIDENT: bot sat on three SETTLED markets for 4.4 hours
 
-Found during a status check. kalshi-lab was "active", logging news and
+Found during a status check. kalshi-market-maker was "active", logging news and
 refreshing the incentive screen, with the Kalshi WebSocket connected --
 and producing no usable data at all since 16:32:04 UTC.
 
@@ -2116,11 +2116,11 @@ restore). Three small positions were open at restart
 (KXTRUMPAPPROVE-26OCT22-A38.5 +14, -E38.3 -27, -E38.4 -51, ~$2
 unrealized); run `backfill_settlements.py --apply` once they resolve.
 PHASE 0.6 WINDOW STARTED 2026-10-22 04:21:36 UTC (ts 1792642896), the
-kalshi-lab restart. (Superseded: restarted 2026-10-23 22:55 UTC, see that
+kalshi-market-maker restart. (Superseded: restarted 2026-10-23 22:55 UTC, see that
 entry; ends 2026-11-06 22:55 UTC.) Verified at start: droplet
 files hash-identical to local, all 74 tests pass in the service venv, all 3
 auto-selected markets qualifying both sides, 0 forced exits, healthcheck
-exit 0. Pre-deploy copies in /root/kalshi_liquidity_lab/predeploy_20261022/. Gate: 14 consecutive
+exit 0. Pre-deploy copies in /root/kalshi-market-maker/predeploy_20261022/. Gate: 14 consecutive
 days, NO behaviour changes, net simulated P&L plus modelled reward
 positive with the competitive-response caveat stated.
 
@@ -2139,12 +2139,12 @@ two lines back into `__init__`; regression test
 `test_market_runtime_state_initialises_quote_and_close_time`.
 
 ### Window restarted
-The 10-22 window was already broken: needrestart restarted kalshi-lab at
+The 10-22 window was already broken: needrestart restarted kalshi-market-maker at
 06:01 UTC on 10-22 after an xz-utils update. The fix needs a restart anyway,
 so **PHASE 0.6 WINDOW RESTARTED 2026-10-23 22:55:48 UTC; ends 2026-11-06
 22:55 UTC.** Same behaviour as the previous window (TAKER_EXITS_ENABLED =
 False) plus this bug fix. Pre-deploy copies are in
-/root/kalshi_liquidity_lab/predeploy_20261023/.
+/root/kalshi-market-maker/predeploy_20261023/.
 Dropped from the books at restart: KXRAINONT-27FEB27-27FEB27-T0, short 342
 (-$15.39 unrealized). It resolves Feb 2027, so there is nothing to backfill
 soon.
