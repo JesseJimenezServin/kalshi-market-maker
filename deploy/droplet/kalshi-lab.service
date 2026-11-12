@@ -1,5 +1,5 @@
 [Unit]
-Description=Kalshi Liquidity Lab - Phase 0 paper trading (read-only, no real orders)
+Description=Kalshi Market Maker - Phase 0 paper trading (read-only, no real orders)
 After=network-online.target
 Wants=network-online.target
 

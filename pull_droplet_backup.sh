@@ -12,7 +12,7 @@
 
 set -u
 
-DEST_DIR="/Users/jessejimenez/projects/kalshi_liquidity_lab/droplet_backups"
+DEST_DIR="$HOME/projects/kalshi-market-maker/droplet_backups"
 KEEP_LAST=7
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 DEST_FILE="${DEST_DIR}/paper_trading_${TIMESTAMP}.sqlite"

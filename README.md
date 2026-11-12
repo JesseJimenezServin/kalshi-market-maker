@@ -1,265 +1,170 @@
-# Kalshi Liquidity Lab — Phase 0 (Paper Trading, Zero Capital Risk)
+# Kalshi Market Maker
 
-This project connects to Kalshi's market data (demo environment recommended
-to start) and **simulates** what would happen if you ran a basic
-two-sided liquidity-providing quote — without ever placing a real order.
-It logs two things over time:
+A paper-trading market maker for [Kalshi](https://kalshi.com) prediction
+markets. It was built to collect rewards from Kalshi's **Liquidity Incentive
+Program**, which pays people who keep orders resting near the best price.
 
-1. **Reward simulation** — your hypothetical share of each Liquidity
-   Incentive Program snapshot, computed using Kalshi's actual published
-   scoring formula (Reference Price, Discount Factor, per-side
-   normalization).
-2. **Adverse-selection simulation** — the hypothetical inventory and P&L
-   you'd have accumulated from real trade flow crossing your simulated
-   resting quotes.
+It ran from September to October 2026, first on a laptop and then 24/7 on
+a cloud server. It streamed live
+order books, simulated a two-sided quote against real trade flow, and logged
+about 2.8 million snapshots. **It never placed a real order.** Every trade
+described here was simulated against live market data.
 
-**No orders are ever placed by this code.** It is entirely read-only.
+**Status: concluded (2026-10-26).** The strategy lost money in simulation,
+and the analysis below explains why. Originally called *Kalshi Liquidity Lab*;
+paths under `/root/kalshi_liquidity_lab` in `deploy/` are the real paths it
+ran at.
 
-## ⚠️ Important: this sandbox cannot reach Kalshi's servers
+> **Sister project:** [Kalshi-Bot](https://github.com/JesseJimenezServin/Kalshi-Bot)
+> asked a different question (do new markets open mispriced?) and reused the
+> lessons learned here.
 
-I built and unit-tested all the logic here, but this development
-environment's network is allow-listed to a specific set of domains and
-**does not include Kalshi's API** (`api.elections.kalshi.com` /
-`demo-api.kalshi.co`). A live connection attempt from here returns an
-explicit `host_not_allowed` denial. This is expected — **run this on your
-own machine**, where it will reach Kalshi normally. I validated:
-- All modules import and compile cleanly.
-- The order-book reconstruction (snapshot + delta + gap detection) against
-  synthetic messages shaped like Kalshi's documented WebSocket schema.
-- The reward-scoring formula against hand-computed examples.
-- The inventory/P&L simulator against hand-computed fills.
+---
 
-See `test_logic.py` — run `python3 test_logic.py` any time to re-verify
-the logic on your machine too.
+## The result
 
-## Setup (on your own machine)
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-1. Create a Kalshi account and switch to the **demo** environment first
-   (no real money, same API).
-2. In the Kalshi dashboard, generate an API Key ID and download the RSA
-   private key (`.pem` file).
-3. Set environment variables:
-
-```bash
-export KALSHI_ENV=demo
-export KALSHI_API_KEY_ID="your-key-id"
-export KALSHI_PRIVATE_KEY_PATH="/path/to/your/private_key.pem"
-```
-
-## Step 1 — (optional) preview what the pipeline would pick
-
-```bash
-python3 incentive_screener.py
-```
-
-This lists currently-active Liquidity Incentive Program markets, ranked by
-a crowding-aware adjusted score (reward density, dampened for real
-resting depth and recent trade-price volatility — see
-`incentive_screener.py`). You don't need to act on this manually: by
-default (`config.AUTO_SELECT_WATCHLIST = True`), `main.py` runs this same
-ranking itself at startup and picks its own watch list — see Step 2.
-Running it yourself first is just a way to preview what it'll likely
-choose, or to sanity-check the ranking.
-
-## Step 2 — watch list: autonomous by default, manual as a fallback
-
-With `config.AUTO_SELECT_WATCHLIST = True` (the default), `main.py`
-autonomously selects `config.NUM_MARKETS_TO_WATCH` markets at startup via
-`incentive_screener.select_watchlist` — each candidate's REAL crowding
-ratio must be at/below `config.SWITCH_CANDIDATE_MAX_CROWDING_RATIO`, the
-same bar `market_switcher.py` requires of a replacement later, so day-0
-selection and later mid-run switches use one consistent standard. No
-manual curation needed. This is runtime-only, like the market switcher
-below — a restart re-runs selection from scratch.
-
-If auto-selection finds nothing eligible (or `AUTO_SELECT_WATCHLIST` is
-set to `False`), it falls back to the manual `config.py`
-`WATCHED_MARKET_TICKERS` list — edit that list yourself if you want a
-fixed, hand-picked watch list instead.
-
-## Step 3 — run the paper-trading pipeline
-
-```bash
-./manage.sh start main
-```
-
-Use `./manage.sh` (start/stop/restart/status) instead of running
-`python3 main.py` directly and managing it by hand -- it uses a PID file
-so restarts always target the exact right process. (main.py also refuses
-to start a second instance of itself no matter how it's launched -- see
-`singleton_lock.py` and the 2026-09-01 incident in `PROJECT_STATUS.md`:
-running multiple copies by accident corrupted a data-collection window by
-writing to the same SQLite file from several unaware processes at once.)
-
-This will:
-- Stream the live order book and trade tape for your watched markets.
-- Every ~1 second, compute your hypothetical Liquidity Incentive Program
-  snapshot score (assuming you're resting `DEFAULT_SIMULATED_QUOTE_SIZE`
-  contracts at the best bid on each side — see `config.py`).
-- On every real trade print, update a simulated inventory position and
-  P&L, respecting each market's `max_inventory` as a hard cap (mimicking
-  a policy of pulling quotes once you hit a position limit). Each
-  watched market's cap comes from splitting `config.STARTING_CAPITAL_USD`
-  across the current watch list by profit/risk (see `capital_allocator.py`),
-  not one flat number per market.
-- Log everything to `data/paper_trading.sqlite`.
-
-Let it run for a while — ideally the full 1–2 week window we discussed —
-to gather enough data across different market regimes (quiet periods and
-at least one volatility event) to be meaningful.
-
-## Step 4 — watch it live in the dashboard
-
-> **Where this should run.** Since 2026-10-01 the real run lives on a
-> DigitalOcean Droplet, and the dashboard runs there too
-> (`kalshi-dashboard.service`, bound to localhost). View it over an SSH
-> tunnel rather than starting a second copy locally:
->
-> ```bash
-> ssh kalshi-dash      # then open http://localhost:8000/
-> ```
->
-> `kalshi-dash` is an entry in `~/.ssh/config` that points at the Droplet
-> and carries `LocalForward 8000 127.0.0.1:8000`, so one command opens the
-> shell and the tunnel together. The long form is
-> `ssh -i ~/.ssh/kalshi_droplet_admin -L 8000:127.0.0.1:8000 root@<droplet-ip>`.
-> There is also a plain `kalshi` entry with no forward, for admin work.
->
-> The dashboard is bound to 127.0.0.1 ON the Droplet and is not reachable
-> from the internet; the tunnel is the only way in. Keep the SSH session
-> open while viewing -- closing it closes the tunnel.
->
-> Expect the first chart to appear up to ~25s after the page loads, and to
-> refresh about every 24s thereafter (a payload build costs ~9s and
-> `WS_TICK_SECONDS` is 15s). That is deliberate: at a 1s tick the build
-> saturated the Droplet's single vCPU and starved the collector.
->
-> A dashboard started on your laptop reads your laptop's
-> `data/paper_trading.sqlite`, which is NOT the live run's database --
-> on 2026-10-02 that silently showed a run that had stopped four weeks
-> earlier. If you do need a local view of the Droplet's data, point
-> `KALSHI_DB_PATH` at a pulled snapshot (see `.env.example`) and accept
-> that it lags the last backup. The laptop is being removed from the
-> system entirely -- see "Target architecture" in PROJECT_STATUS.md.
-
-The local commands below still apply when you are running the whole
-pipeline on one machine (initial setup, development, or a self-contained
-replication):
-
-```bash
-./manage.sh start server
-```
-
-(Or `./manage.sh start both` to start main.py + server.py together, and
-`./manage.sh status` any time to check what's currently running.)
-
-Then open http://127.0.0.1:8000/ in a browser. This is a read-only FastAPI
-server that streams live updates from `data/paper_trading.sqlite` over a
-WebSocket once per second -- it never talks to Kalshi and places no orders.
-It shows the watched markets table (real market name, risk level with a
-plain-English explanation of why, our crowding-based "competition
-level" proxy, target size, discount factor, total reward and program
-start/end dates, daily pool, net P&L), order book depth bars, a
-recent-fills table, a capital allocation panel (per-market $ and % of
-the current starting balance), a portfolio balance chart, and a
-reward-score-vs-P&L performance chart. Safe to run alongside `main.py`
-at any time (or on its own, before you've collected any data).
-
-## Step 5 — analyze results
-
-Query `data/paper_trading.sqlite` directly, e.g.:
-
-```bash
-sqlite3 data/paper_trading.sqlite "
-SELECT ticker,
-       AVG(combined_score) AS avg_snapshot_score,
-       COUNT(*) AS snapshots
-FROM snapshot_scores
-GROUP BY ticker;
-"
-
-sqlite3 data/paper_trading.sqlite "
-SELECT ticker, MIN(unrealized_pnl_cents), MAX(unrealized_pnl_cents), MAX(ABS(net_yes_contracts))
-FROM inventory_marks
-GROUP BY ticker;
-"
-```
-
-The question Phase 0 exists to answer: **does the average snapshot score
-(→ converted to expected reward dollars using the program's period_reward)
-plausibly exceed the worst-case swings in `unrealized_pnl_cents`?** If
-reward income is consistently dwarfed by adverse-selection swings on a
-given market, drop it from the watch list. If it looks favorable across
-several quiet weeks, that market is a candidate for the small live pilot
-(Phase 1) — not before.
-
-## Known simplifications in this Phase 0 model (read before trusting numbers)
-
-1. **"My share" estimation.** The public order book only shows aggregate
-   size per price level, not individual participants. `reward_simulator.py`
-   estimates your share by adding your hypothetical size on top of the
-   existing level, crediting only your own contribution in the numerator
-   (verified 2026-09-02 — an earlier comment here claiming it double-counted
-   others' resting size was itself wrong and has been corrected). What it
-   genuinely can't model is competitive *response*: other real liquidity
-   providers might change their own behavior once you're resting there
-   too, which no snapshot of the public book can reveal. Treat Phase 0
-   reward numbers as an optimistic estimate, not a guarantee — validating
-   that gap requires Phase 1 real fills.
-
-2. **Fill-probability heuristic in adverse-selection sim.** `main.py` now
-   computes `my_share_estimate` from the live resting size at the exact
-   touched price level at the moment of the trade (see
-   `compute_my_share_at_touched_price` in `main.py`), rather than a fixed
-   placeholder. It shares the same competitive-response caveat as #1
-   above (assumes other participants' behavior at that price doesn't
-   change in response to us).
-
-3. **Quoting policy.** `quoting_policy.compute_quote` rests at the live
-   Reference Price (not just the touch) before applying inventory skew
-   and risk-based widening/pulling — see `risk_engine.py` for the
-   LOW/ELEVATED/HIGH escalation (now also fed by `event_calendar.py`'s
-   close-time proximity flag, alongside volatility, inventory, and news)
-   and `market_switcher.py` (enabled as of 2026-09-02) for switching away
-   from a market that sustains HIGH risk or high crowding. Still
-   intentionally simple relative to a fully optimized policy — the point
-   of Phase 0 is a measurable baseline to improve on, not a finished
-   strategy.
-
-4. **Target Size / Discount Factor.** `main.py` now seeds each watched
-   market's `MarketRuntimeState` with the real `target_size` and
-   `discount_factor` pulled live from `screen_incentive_programs` at
-   startup (see `build_market_states` in `main.py`). Watched tickers with
-   no active incentive program are skipped, not defaulted.
-
-None of these are hard to fix — they're flagged so Phase 0's numbers are
-read correctly (as a promising/discouraging *signal*, not a precise
-forecast) while we tighten the model with real observed data.
-
-## File map
-
-| File | Purpose |
+| | |
 |---|---|
-| `config.py` | Environment, watch list, thresholds |
-| `auth.py` | RSA-PSS request signing |
-| `rest_client.py` | REST wrapper (markets, incentive programs, account) |
-| `orderbook.py` | Local order-book state from snapshot + deltas |
-| `ws_client.py` | Authenticated WebSocket client, reconnect + resync |
-| `incentive_screener.py` | Ranks active liquidity-incentive markets |
-| `reward_simulator.py` | Implements the actual scoring formula |
-| `adverse_selection_sim.py` | Hypothetical inventory + P&L from trade flow |
-| `logger.py` | SQLite persistence |
-| `event_calendar.py` | Feeds real close/resolution-time proximity into `risk_engine.py` |
-| `capital_allocator.py` | Splits the starting balance across watched markets by profit/risk |
-| `main.py` | Orchestrates everything |
-| `server.py` | Read-only FastAPI dashboard, streams `data/paper_trading.sqlite` over `/ws` |
-| `templates/dashboard.html` | Dashboard single-page UI (markets, depth, fills, chart) |
-| `test_logic.py` | Offline unit tests (no network needed) |
-| `deploy/` | Droplet-side artifacts: off-box backup push, systemd units, install steps |
-| `pull_droplet_backup.sh` | **Being retired** -- laptop-side backup pull, replaced by `deploy/push_offbox_backup.sh` |
+| Simulated capital | $1,000 |
+| Main run (2026-09-30 → 10-13) | **−$746.73 (−74.7%)** |
+| Passive (maker) volume | 359,637 contracts |
+| Share of the reward pool captured | 1.819%, steady |
+| Both sides qualifying for rewards | 99.7% of 2.8M snapshots |
+| Loss caused by forced exits alone | **$1,267.01** |
+
+The surprising part is that the passive quoting roughly broke even. Forced
+exits, which crossed the spread into thin books, cost more than the entire
+loss. With those exits priced at the mid, the same run would have ended
+about **+$520**, though that is an upper bound.
+
+After a reset, the run repeated the pattern from 10-13 to 10-22: passive
+fills **+$123**, taker exits **−$823**. Turning off taker exits was the
+final change. The project was stopped before that version finished its
+planned 14-day measurement window.
+
+Full write-ups:
+- [`AUTOPSY.md`](AUTOPSY.md): what happened, measured from the database
+- [`BLUEPRINT.md`](BLUEPRINT.md): the redesign that the data called for
+- [`DATA.md`](DATA.md): the dataset and which parts of it can be trusted
+- [`PROJECT_STATUS.md`](PROJECT_STATUS.md): the day-by-day engineering log,
+  incidents included
+
+---
+
+## What I learned
+
+**1. Know exactly what you are paid for.** The reward formula pays for
+*resting size at good prices*. It pays nothing for trading. A fill removes
+the size that was earning the reward and leaves you holding inventory. I
+built a market maker that tried to maximise fills, when the business needed
+the opposite: rest as much size as possible and get filled as little as
+possible. That one inverted assumption explains the results better than any
+single bug.
+
+**2. On binary markets, flow is directional.** Mean fill imbalance was
+**47%**, and some markets filled **100% on one side**. When news arrives,
+informed traders hit the side that is about to be wrong, so a two-sided
+quote fills on the side you least want. A market maker needs both sides to
+fill. Here they mostly didn't.
+
+**3. A risk control is only as good as the action it triggers.** On 10-08 I
+made the "high risk" state last 30 minutes instead of about 5. The
+measurement was right and well calibrated. But "high risk" also armed a
+forced exit that crossed the spread with no price limit. Keeping the state
+on 6× longer tripled exposure to that exit, and the run lost **$467 in 28
+hours**, its worst day. I never asked what else depended on the state I
+changed.
+
+**4. Change one thing at a time, or you are not measuring anything.** Six
+behaviour-changing deploys in 14 days meant the longest window with a
+single consistent strategy was about 28 hours. Each fix was justified on
+its own. Together they meant no version of the strategy was ever properly
+tested.
+
+**5. Suspect your profits before your losses.** Early on, the simulation
+showed a profit. It came from a floating-point bug: order-book levels
+cancelled to zero left residues like `5.55e-17` and were never removed.
+**31.6% of logged price levels were phantoms**, and $161 of the $162
+"profit" came from the six markets with the worst-corrupted books. Every
+market with a clean book made roughly nothing. (The sister project uses
+`Decimal` throughout for this reason.)
+
+**6. Record raw inputs, not just your conclusions.** The database stored the
+price *we* quoted, not the price each trade printed at. So the most
+important question, whether a quote one tick deeper would still have been
+filled, couldn't be answered until the raw trade tape was added on 10-13.
+
+**7. Test signals against the base rate.** The news signal fired 61% of the
+time and was **anti-predictive**: large moves were *less* likely after a
+news hit than at a random moment. An event signal used a 48-hour window on
+markets that lived 24 hours, so it never switched off. Together these two
+signals widened quotes about 80% of the time and suppressed reward income.
+Fixing them raised the reward score by 183%.
+
+**8. A simulation can't show how competitors react.** The 1.819% reward
+share assumes nobody responds to our resting size. A real order in a
+$60,000/day program would attract competition. Every reward figure here is
+therefore an upper bound, and only a small live test could have measured
+the real number. That test was never run.
+
+**What worked:** a monitor that caught a stalled market without anyone
+watching. Two-layer backups, checked by actually restoring one. WAL-mode
+SQLite, which stopped a daily data-loss bug. A query rewrite that made the
+dashboard **110× faster** (34s → 0.31s). And a fill model that proved honest
+when checked: our simulated fills were 2.7% of real volume against a
+modelled 2.2%.
+
+---
+
+## How it works
+
+```
+Kalshi WebSocket ──► orderbook.py (snapshot + deltas, gap detection → resync)
+                        │
+                        ├─► reward_simulator.py      Kalshi's published scoring formula
+                        ├─► quoting_policy.py        where to rest, with inventory skew
+                        ├─► risk_engine.py           volatility / displacement / inventory → LOW…HIGH
+                        └─► adverse_selection_sim.py fills inferred from real trade prints
+                                   │
+                              logger.py ──► SQLite (WAL) ──► server.py dashboard (FastAPI, WebSocket)
+```
+
+- **Market selection**: `incentive_screener.py` ranks live incentive
+  programs by reward per unit of crowding. `market_switcher.py` rotates out
+  of markets that become crowded, volatile or dead.
+- **Capital**: `capital_allocator.py` splits the $1,000 across watched
+  markets by reward and risk.
+- **Read-only by construction**: the REST client refuses anything but GET,
+  so no code path can place an order.
+- **Operations**: one DigitalOcean droplet running systemd services. A
+  healthcheck alerts by push notification. A daily on-box backup plus an
+  off-box backup to Backblaze B2 runs an integrity check before upload and
+verifies the uploaded size afterwards.
+  See [`deploy/`](deploy/).
+- **Analysis**: `offset_sweep.py` replays recorded books to trade reward
+  score against fill rate at each distance from the reference price.
+  `backfill_settlements.py` books resolved markets at 0 or 100.
+
+About 8,500 lines of Python. 75 offline tests in `test_logic.py`, no network
+needed.
+
+## Running it
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # Kalshi API key ID + private key path
+python3 test_logic.py         # offline tests
+./manage.sh start main        # paper-trading pipeline → data/paper_trading.sqlite
+./manage.sh start server      # dashboard on http://127.0.0.1:8000
+```
+
+You need a Kalshi API key; an unfunded account is enough, since nothing
+here trades. The 3.2 GB dataset from the run is archived offline and not in
+this repository.
+
+---
+
+*Built with [Claude Code](https://claude.com/claude-code) as a pair
+programmer. I set the direction, made the decisions and reviewed the
+results.*

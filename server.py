@@ -1,5 +1,5 @@
 """
-Read-only FastAPI dashboard for the Kalshi Liquidity Lab paper-trading
+Read-only FastAPI dashboard for the Kalshi Market Maker paper-trading
 pipeline.
 
 This server NEVER talks to Kalshi and places no orders of any kind -- it
@@ -63,7 +63,7 @@ logger = logging.getLogger("server")
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-app = FastAPI(title="Kalshi Liquidity Lab Dashboard")
+app = FastAPI(title="Kalshi Market Maker Dashboard")
 
 # Ensures the schema exists even if main.py has never been run yet, so the
 # dashboard can start up and show an empty (rather than broken) state.

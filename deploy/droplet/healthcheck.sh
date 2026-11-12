@@ -1,5 +1,5 @@
 #!/bin/bash
-# Healthcheck for the whole Kalshi Liquidity Lab box, run from cron every
+# Healthcheck for the whole Kalshi Market Maker box, run from cron every
 # 5 minutes. Checks the things whose silent failure would cost data:
 #
 #   1. kalshi-lab is active                       (the collector)

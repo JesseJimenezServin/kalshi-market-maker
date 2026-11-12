@@ -8,3 +8,4 @@ logs/
 __pycache__/
 *.pid
 *.out.log
+.DS_Store

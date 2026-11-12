@@ -1,5 +1,5 @@
 [Unit]
-Description=Push a compressed Kalshi Liquidity Lab DB snapshot off-box
+Description=Push a compressed Kalshi Market Maker DB snapshot off-box
 Documentation=file:/root/kalshi_liquidity_lab/deploy/README.md
 After=network-online.target
 Wants=network-online.target

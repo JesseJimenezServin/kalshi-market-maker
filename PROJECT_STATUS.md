@@ -2366,3 +2366,12 @@ simply start failing writes when the disk fills.
    ranking should be stable. Rerun with --since <window start> at the end.
 5. At day 14: gate per BLUEPRINT.md section 6. Pass -> Phase 1 (one market,
    minimum qualifying size, real orders; measure observed vs modelled share).
+
+## 2026-10-26: project concluded
+
+Put dormant at the owner's request before the Phase 0.6 window (ending
+2026-11-06) completed: services disabled, cron lines commented out. The
+final database was archived off-box (Backblaze B2 `final/`) and to the
+owner's laptop with a verified sha256, then deleted from the droplet.
+Phase 1, the only test that could measure the competitive response, was
+never run. See README.md for the results and lessons.

@@ -1,5 +1,5 @@
 """
-Central configuration for the Kalshi Liquidity Lab (Phase 0: paper trading / simulation only).
+Central configuration for the Kalshi Market Maker (Phase 0: paper trading / simulation only).
 
 IMPORTANT: This module never places live orders. Phase 0 is entirely read-only:
 it connects to Kalshi's public/authenticated market-data endpoints, logs what

@@ -1,5 +1,5 @@
 [Unit]
-Description=Kalshi Liquidity Lab - read-only dashboard (localhost only, access via SSH tunnel)
+Description=Kalshi Market Maker - read-only dashboard (localhost only, access via SSH tunnel)
 After=network-online.target kalshi-lab.service
 Wants=network-online.target
 

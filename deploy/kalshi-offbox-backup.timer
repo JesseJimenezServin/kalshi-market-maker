@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily off-box push of the Kalshi Liquidity Lab database
+Description=Daily off-box push of the Kalshi Market Maker database
 
 [Timer]
 # Daily, shortly after the existing on-box backup. RandomizedDelaySec keeps
